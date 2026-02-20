@@ -1,0 +1,2 @@
+add_executable(brunel_network brunel_network.cpp)
+target_link_libraries(brunel_network PRIVATE nrn)
