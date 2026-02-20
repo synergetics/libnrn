@@ -2,7 +2,7 @@
 
 ## Vision
 
-A GPU-native, libtorch-semantic framework for simulating the full biological neural
+A GPU-native framework **built on libtorch** for simulating the full biological neural
 substrate — neurons, glia, neuromodulation, structural plasticity — at scale on
 NVIDIA GPU clusters.
 
@@ -12,9 +12,11 @@ Brian2CUDA can run glia on a single GPU. None use modern interconnects (NVSHMEM,
 The 2024-2025 discovery of astroengrams (astrocyte memory traces) makes neuron-only
 simulation demonstrably incomplete.
 
-libnrn fills this gap with a from-scratch design that rethinks computational primitives
-for GPU efficiency rather than literally transcribing biological network topology onto
-hardware that hates irregular sparse access patterns.
+libnrn fills this gap by building on libtorch's tensor infrastructure and module system,
+adding domain-specific CUDA kernels for neuroscience. Rather than reinventing GPU memory
+management, serialization, and distributed collectives, we inherit them from PyTorch and
+focus engineering effort on what's actually novel: the masked-dense simulation paradigm,
+custom neuron/synapse kernels, multi-timescale orchestration, and NVSHMEM spike delivery.
 
 ---
 
@@ -115,8 +117,10 @@ The framework operates on tensors, not graphs. A "network" is:
 - A set of temporal operators (parallel scan coefficients, delay buffers)
 - A set of plasticity rules operating on the connectivity tensors
 
-This is why the libtorch analogy is deep — it's not just API similarity, it's the
-same computational substrate (tensor ops on GPU) applied to a different domain.
+This is why building on libtorch is natural — it's not just API similarity, it's the
+same computational substrate (tensor ops on GPU) applied to a different domain. We use
+`torch::Tensor` directly as our data container and inherit from `torch::nn::Module`
+for our component hierarchy.
 
 ### When This Breaks Down
 
@@ -148,44 +152,67 @@ Honest assessment of where the dense/block-sparse paradigm has limits:
 
 ## Part II: Abstractions & API
 
-### Mapping to libtorch
+### Relationship to libtorch
 
-| libtorch                | libnrn             | Purpose                                            |
-| ----------------------- | ------------------ | -------------------------------------------------- |
-| `torch::Tensor`         | `nrn::Tensor`      | State tensors (voltages, currents, concentrations) |
-| `torch::nn::Module`     | `nrn::Module`      | Composable simulation components                   |
-| `torch::autograd`       | `nrn::Plasticity`  | Local/global learning rules (replaces backprop)    |
-| `torch::optim`          | `nrn::Optimizer`   | Meta-learning / rule parameter updates             |
-| `torch::nn::Sequential` | `nrn::Network`     | Composed networks with connectivity                |
-| `torch::distributed`    | `nrn::Distributed` | Multi-GPU/node via NCCL + NVSHMEM                  |
-| `torch::data`           | `nrn::Stimulus`    | Input generators and replay buffers                |
-| `torch::jit`/`compile`  | `nrn::Compile`     | Kernel fusion / graph optimization                 |
-| `torch::Device`         | `nrn::Device`      | GPU placement, partitioning                        |
-| TensorBoard             | `nrn::Monitor`     | Observation, recording, analysis                   |
+libnrn uses libtorch directly rather than reimplementing parallel abstractions. The
+mapping is:
+
+| libtorch (used directly)   | libnrn (extends/wraps)   | Strategy                                                     |
+| -------------------------- | ------------------------ | ------------------------------------------------------------ |
+| `torch::Tensor`            | used directly             | All state, weights, masks are `torch::Tensor`. No wrapper.   |
+| `torch::nn::Module`        | `nrn::Module` (inherits) | Adds `forward(State&, Time, Duration)` and `reset()`.        |
+| `torch::autograd`          | `nrn::Plasticity`        | Local/global learning rules (replaces backprop). Can selectively register autograd functions for differentiable parameter fitting. |
+| `torch::optim`             | `nrn::Optimizer`         | Meta-learning / rule parameter updates                       |
+| `torch::nn::Sequential`    | `nrn::Network`           | Composed networks with connectivity                          |
+| `torch::distributed` (NCCL)| `nrn::Distributed`       | NCCL for collectives (inherited). NVSHMEM for spike delivery (custom). |
+| `torch::data`              | `nrn::Stimulus`          | Input generators and replay buffers                          |
+| `torch::sparse_bsr`        | `nrn::BlockDenseConn`    | BSR format maps directly to block-dense + CSR-of-blocks      |
+| `torch::Device`            | used directly             | GPU placement via standard torch device API                  |
+| `torch::save`/`torch::load`| used directly             | Checkpointing via state_dict (same as PyTorch models)        |
+| `torch::cuda::CUDAGraph`   | used for hot paths        | Capture repetitive simulation steps to amortize launch overhead |
+| TensorBoard                | `nrn::Monitor`           | Observation, recording, analysis                             |
+
+**What we inherit for free** (not reimplemented):
+- GPU memory management (torch's CUDA caching allocator)
+- Tensor ops: matmul, elementwise, scatter/gather, reductions, indexing
+- cuBLAS/cuSPARSE/cuRAND integration
+- Dtype and device management
+- Module parameter registration, `state_dict`, serialization
+- NCCL distributed collectives (allreduce, broadcast)
+- Python interop (torch tensors cross the C++/Python boundary natively)
+
+**What we build on top** (custom CUDA kernels registered as torch ops):
+- Neuron model kernels (LIF/AdEx/HH ODE solvers)
+- Parallel scan for state evolution
+- NVSHMEM GPU-initiated spike delivery
+- Fused mask-matmul (if torch::mm + elementwise proves insufficient)
+- Ring buffer delay management
+- Multi-timescale clock orchestration
+- DSL → CUDA compilation via NVRTC
+
+Custom kernels access raw device pointers via `tensor.data_ptr<float>()` and execute
+on torch's CUDA streams. Registered via `TORCH_LIBRARY` for seamless integration.
 
 ### Module System
 
 ```cpp
-class Module {
-  // Core simulation interface
+// nrn::Module inherits from torch::nn::Module
+class Module : public torch::nn::Module {
+  // Domain-specific simulation interface (added by libnrn)
   virtual void forward(nrn::State& state, nrn::Time t, nrn::Duration dt) = 0;
   virtual void reset() = 0;
 
-  // Torch-style parameter management
-  void register_parameter(std::string name, nrn::Tensor param);
-  void register_buffer(std::string name, nrn::Tensor buf);
-  void register_mask(std::string name, nrn::Mask mask);  // connectivity masks
+  // Connectivity masks (libnrn extension — stored as registered buffers)
+  void register_mask(std::string name, torch::Tensor mask);
 
-  // Serialization
-  StateDict state_dict();
-  void load_state_dict(StateDict dict);
-
-  // Composition
-  void register_module(std::string name, std::shared_ptr<Module> module);
-
-  // Device management
-  void to(nrn::Device device);
-  void to(nrn::dtype dtype);
+  // Inherited from torch::nn::Module (NOT reimplemented):
+  // - register_parameter(name, tensor)
+  // - register_buffer(name, tensor)
+  // - register_module(name, module)
+  // - state_dict() / load_state_dict()
+  // - to(device) / to(dtype)
+  // - parameters() / named_parameters()
+  // - modules() / named_modules()
 };
 ```
 
@@ -385,21 +412,23 @@ support:
 
 Connectivity between populations A and B is represented as:
 
-```
-ConnectivityTensor {
+```cpp
+struct ConnectivityTensor {
   // Block structure (which blocks exist — sparse)
-  BlockIndex block_map;         // CSR-like: which (A_block, B_block) pairs exist
+  // Can use torch::sparse_bsr_tensor for the overall structure
+  torch::Tensor crow_indices;          // CSR row pointers
+  torch::Tensor col_indices;           // CSR column indices
 
-  // Per-block dense data
-  Tensor weights;               // [n_blocks, B, B] — synaptic efficacy
-  Tensor structural_mask;       // [n_blocks, B, B] — which connections exist (binary)
-  Tensor modulatory_mask;       // [n_blocks, B, B] — neuromodulatory gain (float)
-  Tensor delays;                // [n_blocks, B, B] — axonal delay (int, indexes ring buf)
+  // Per-block dense data (all torch::Tensor on GPU)
+  torch::Tensor weights;               // [n_blocks, B, B] — synaptic efficacy
+  torch::Tensor structural_mask;       // [n_blocks, B, B] — which connections exist (binary)
+  torch::Tensor modulatory_mask;       // [n_blocks, B, B] — neuromodulatory gain (float)
+  torch::Tensor delays;                // [n_blocks, B, B] — axonal delay (int, indexes ring buf)
 
   // Per-block synapse state (for dynamic synapses)
-  Tensor stp_u, stp_x;         // short-term plasticity state
-  Tensor trace_pre, trace_post; // eligibility traces for plasticity
-}
+  torch::Tensor stp_u, stp_x;         // short-term plasticity state
+  torch::Tensor trace_pre, trace_post; // eligibility traces for plasticity
+};
 ```
 
 **Block size** is a tunable parameter (128, 256, 512, 1024). Smaller blocks = finer
@@ -462,12 +491,12 @@ are cheap (bit flips on GPU). Block structure changes are batched.
 Plasticity rules are **pluggable modules** that operate on connectivity tensors:
 
 ```cpp
-class PlasticityRule : public Module {
+class PlasticityRule : public nrn::Module {
   virtual void update(
     ConnectivityTensor& conn,
-    const Tensor& pre_state,
-    const Tensor& post_state,
-    const Tensor& modulator_state,  // neuromodulatory context
+    const torch::Tensor& pre_state,
+    const torch::Tensor& post_state,
+    const torch::Tensor& modulator_state,  // neuromodulatory context
     Time t, Duration dt
   ) = 0;
 };
@@ -548,15 +577,15 @@ Each system is a `Module` maintaining a concentration field that modulates the
 Neuromodulators act via diffusion, not point-to-point synapses:
 
 ```cpp
-class VolumeTransmitter : public Module {
-  Tensor concentration_field;    // per-region or per-voxel concentration
+class VolumeTransmitter : public nrn::Module {
+  torch::Tensor concentration_field;    // per-region or per-voxel concentration
   float release_rate;
   float reuptake_rate;
   float degradation_rate;
   float diffusion_coefficient;
 
-  void forward(State& state, Time t, Duration dt) override;
-  Tensor sample_at(Tensor positions);  // query concentration at locations
+  void forward(nrn::State& state, nrn::Time t, nrn::Duration dt) override;
+  torch::Tensor sample_at(torch::Tensor positions);  // query concentration at locations
 };
 ```
 
@@ -789,16 +818,20 @@ cache.
 
 ### Design Principles
 
-1. **Structure of Arrays (SoA)**: neuron state as separate contiguous arrays per variable.
+1. **Structure of Arrays (SoA)**: neuron state as separate `torch::Tensor` per variable.
    `v[N], w[N], I_syn[N]` — not `struct Neuron { v, w, I_syn } neurons[N]`.
-   Enables coalesced memory access.
+   Separate tensors = coalesced memory access and idiomatic torch usage.
 
-2. **Persistent kernels**: main simulation loop runs as a single long-running kernel
-   that doesn't exit between timesteps. Avoids launch overhead.
+2. **CUDA Graphs for launch amortization**: the repetitive simulation step (synaptic
+   delivery → neuron update → spike detect → plasticity) is captured as a
+   `torch::cuda::CUDAGraph` and replayed each timestep. This eliminates per-op dispatch
+   overhead without requiring persistent kernels for the outer loop. Custom kernels
+   within the graph still run as standard CUDA launches on torch's streams.
 
 3. **Tensor core utilization**: block-dense connectivity matmul uses tensor cores
-   (wmma intrinsics or cuBLAS). This is where the masked-dense paradigm pays off —
-   tensor cores are 16× faster than CUDA cores for matmul.
+   via `torch::mm` / cuBLAS (already wired through libtorch). For the masked-dense
+   paradigm: `torch::mm(W * M_structural * M_modulatory, spike_vec)`. Custom fused
+   kernel only if profiling shows elementwise + mm is insufficient.
 
 4. **Warp-level parallelism**: one warp per neuron group for local reductions.
    Cooperative groups for flexible sync.
@@ -806,11 +839,12 @@ cache.
 5. **Shared memory**: cache frequently accessed blocks (current input weights,
    spike status of nearby neurons) in SMEM.
 
-6. **Double buffering**: current state and next state in separate buffers to avoid
+6. **Double buffering**: current state and next state in separate tensors to avoid
    race conditions between read and write.
 
-7. **Kernel fusion**: fuse membrane_update + spike_detect + reset into single kernel.
-   Fuse synaptic_current + membrane_update. Fuse plasticity_update + spike_processing.
+7. **Kernel fusion**: fuse membrane_update + spike_detect + reset into single custom
+   CUDA kernel. Registered as a torch custom op via `TORCH_LIBRARY`. For non-hot-path
+   ops, let torch's existing fusion (via CUDAGraphs capture) handle it.
 
 ### Memory Access Pattern
 
@@ -896,10 +930,14 @@ astrocytes:
     covers: [exc_to_exc]  # which connections this astrocyte population covers
 ```
 
-**3. Python bindings** (pybind11, stretch goal Phase 3):
+**3. Python bindings** (via torch extension API — tensors are torch tensors natively):
 ```python
+import torch
 import libnrn as nrn
+
 pop = nrn.neuron.AdEx(80000, v_rest=-70.6, v_thresh=-50.4)
+# pop.state_dict() returns regular torch tensors
+# Can mix with PyTorch models directly
 ```
 
 **4. Equation DSL** (custom models, compiles to CUDA via NVRTC):
@@ -938,7 +976,7 @@ model MyNeuron:
 
 ### Checkpointing
 
-- Full state serialization (same pattern as `torch.save`/`torch.load`)
+- Full state serialization via `torch::save`/`torch::load` on `state_dict()` (inherited)
 - Incremental checkpoints for long runs
 - Checkpoint-restart for fault tolerance
 - Target: <5% overhead
@@ -983,33 +1021,42 @@ model MyNeuron:
 
 ## Part X: Technology Stack
 
-| Component               | Technology                                |
-| ----------------------- | ----------------------------------------- |
-| Language                | C++20 (core) + CUDA 12+ (kernels)         |
-| Build                   | CMake                                     |
-| GPU compute             | CUDA, Cooperative Groups, Tensor Cores    |
-| Multi-GPU (collectives) | NCCL                                      |
-| Multi-GPU (p2p)         | NVSHMEM 3.0 + GPUDirect RDMA              |
-| Transport               | NVLink 4.0 / NVSwitch + InfiniBand        |
-| Partitioning            | METIS / ParMETIS                          |
-| Math libraries          | cuBLAS, cuSPARSE, cuRAND                  |
-| Serialization           | FlatBuffers or Protobuf                   |
-| Config                  | yaml-cpp + nlohmann/json                  |
-| Testing                 | GoogleTest + CUDA test utilities          |
-| Python bindings         | pybind11                                  |
-| Data I/O                | HDF5 (parallel), Zarr, Parquet            |
-| Documentation           | Doxygen + Sphinx                          |
-| DSL compilation         | NVRTC (runtime CUDA compilation)          |
-| Containers              | Docker + NVIDIA NGC base                  |
-| CI                      | GitHub Actions + NVIDIA Container Toolkit |
+| Component               | Technology                                                        |
+| ----------------------- | ----------------------------------------------------------------- |
+| **Foundation**          | **libtorch (PyTorch C++ API)**                                    |
+| Language                | C++20 (core) + CUDA 12+ (custom kernels)                         |
+| Build                   | CMake (libtorch found via `find_package(Torch)`)                  |
+| Tensor ops / GPU memory | libtorch (`torch::Tensor`, CUDA caching allocator)                |
+| Math libraries          | cuBLAS, cuSPARSE, cuRAND (via libtorch, already integrated)      |
+| Module system           | `torch::nn::Module` (inherited, extended with simulation API)     |
+| Serialization (state)   | `torch::save`/`torch::load` on `state_dict()`                    |
+| Sparse tensors          | `torch::sparse_bsr` for block-dense connectivity                 |
+| Launch amortization     | `torch::cuda::CUDAGraph` for repetitive simulation steps         |
+| GPU compute (custom)    | CUDA kernels registered via `TORCH_LIBRARY`                       |
+| Multi-GPU (collectives) | NCCL (via `torch::distributed` for collectives)                   |
+| Multi-GPU (p2p)         | NVSHMEM 3.0 + GPUDirect RDMA (custom, not in torch)              |
+| Transport               | NVLink 4.0 / NVSwitch + InfiniBand                               |
+| Partitioning            | METIS / ParMETIS                                                  |
+| Config                  | yaml-cpp + nlohmann/json                                          |
+| Testing                 | GoogleTest + CUDA test utilities                                  |
+| Python bindings         | torch Python extension API (tensors cross boundary natively)      |
+| Data I/O                | HDF5 (parallel), Zarr, Parquet                                    |
+| Documentation           | Doxygen + Sphinx                                                  |
+| DSL compilation         | NVRTC (runtime CUDA compilation)                                  |
+| Containers              | Docker + NVIDIA NGC base (PyTorch NGC container as base)          |
+| CI                      | GitHub Actions + NVIDIA Container Toolkit                         |
+
+**Note**: libtorch subsumes several previously separate dependencies: cuBLAS, cuSPARSE,
+cuRAND, pybind11, FlatBuffers/Protobuf (for serialization), and the custom GPU memory
+allocator. The NVIDIA NGC PyTorch container provides all of these pre-built.
 
 ---
 
 ## Part XI: Project Phases
 
 ### Phase 1: Foundation (single-GPU spiking engine)
-- Core tensor/state management on GPU (SoA layout)
-- Module system and composition
+- libtorch integration: CMake setup, torch::Tensor as universal data container
+- Module system inheriting from torch::nn::Module
 - LIF, AdEx, Izhikevich neuron kernels
 - Block-dense connectivity with mask overlays
 - Static, exponential, double-exponential, AMPA synapses
@@ -1038,8 +1085,8 @@ model MyNeuron:
 - Validation: reproduce Jiang et al. 2025, De Pitta & Brunel 2022
 
 ### Phase 3: Scale (multi-GPU, multi-node)
-- NVSHMEM spike delivery (GPU-initiated puts)
-- NCCL global state synchronization
+- NVSHMEM spike delivery (GPU-initiated puts — custom, not via torch)
+- NCCL global state synchronization (via torch::distributed)
 - Spatial decomposition + astrocyte-territory-aligned partitioning
 - Ghost neuron management
 - Two-tier communication (fast spikes + slow astro state)
@@ -1053,7 +1100,7 @@ model MyNeuron:
 
 ### Phase 4: Ecosystem (DSL, interop, extreme scale)
 - Equation-based DSL with NVRTC compilation
-- Python bindings (pybind11)
+- Python bindings (via torch Python extension API — tensors are already torch tensors)
 - Brian2 equation importer
 - NeuroML / SONATA / connectome data importers
 - SWC morphology import
@@ -1084,11 +1131,13 @@ model MyNeuron:
    block-dense to procedural (on-the-fly computed) connectivity? Should procedural be
    the default with stored as optimization for irregular patterns?
 
-4. **Memory management**: Custom GPU allocator (arena/pool) or CUDA memory pools?
-   We need efficient allocation for dynamic mask updates and structural plasticity.
+4. **Memory management**: ~~Custom GPU allocator (arena/pool) or CUDA memory pools?~~
+   **RESOLVED**: Use torch's CUDA caching allocator. It handles allocation pooling,
+   fragmentation avoidance, and stream-ordered allocation. No custom allocator needed.
 
 5. **Graph compilation**: `torch.compile`-style ahead-of-time kernel fusion for the
-   simulation graph — Phase 1 or later?
+   simulation graph — Phase 1 or later? Partially addressed by CUDA Graphs for the
+   repetitive simulation step. Full graph compilation deferred to Phase 4.
 
 ### Neuroscience Fidelity
 
@@ -1107,12 +1156,15 @@ model MyNeuron:
 
 ### Interoperability & Use Cases
 
-10. **PyTorch interop**: Should libnrn tensors be convertible to/from torch tensors for
-    hybrid bio-plausible + deep learning models? (e.g., spiking network as a differentiable
-    layer in a deep learning model)
+10. **PyTorch interop**: ~~Should libnrn tensors be convertible to/from torch tensors?~~
+    **RESOLVED**: libnrn tensors ARE torch tensors. Zero-copy interop. Users can use
+    libnrn populations as components in PyTorch models directly. Hybrid bio-plausible +
+    deep learning is a first-class use case.
 
-11. **Differentiability**: Should we support gradients through the simulation (like
-    Jaxley/BrainPy) for parameter fitting? Or is forward-only simulation sufficient?
+11. **Differentiability**: Feasible now that we're on libtorch. Custom CUDA kernels can
+    selectively register `torch::autograd::Function` for parameter fitting paths.
+    Forward-only is the default; autograd support is opt-in per kernel where needed
+    (e.g., fitting neuron model parameters to experimental data).
 
 12. **Real-time mode**: Wall-clock-synchronized mode for robotics/BCI? Or purely
     offline simulation speed?
@@ -1147,8 +1199,9 @@ model MyNeuron:
 - De Pitta & Brunel. "Multiple forms of working memory." PNAS (2022)
 - Jiang et al. "Modeling neuron-astrocyte interactions." PLOS Comp Bio (2025)
 
-### Design Inspiration
-- **libtorch**: API patterns, module system, tensor abstractions
+### Design Inspiration / Foundation
+- **libtorch**: Foundation library — tensor ops, module system, memory management,
+  serialization, NCCL distributed, CUDA Graphs, sparse BSR tensors (used directly)
 - **Mamba/S4**: parallel scan for recurrence on GPUs
 - **Flash Attention**: block-sparse with dense blocks on tensor cores
 - **Megatron-LM**: multi-GPU model parallelism patterns
