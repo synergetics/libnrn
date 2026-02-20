@@ -1,0 +1,64 @@
+# Build
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+*.cmake
+!CMakeLists.txt
+
+# Compiled objects
+*.o
+*.obj
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+*.lib
+
+# CUDA
+*.cubin
+*.fatbin
+*.ptx
+*.gpu
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.ccls-cache/
+compile_flags.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output
+bin/
+lib/
+*.h5
+*.hdf5
+*.zarr/
+*.nwb
+*.parquet
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+*.eggs/
+dist/
+*.whl
+
+# Misc
+*.log
+core
+core.*
