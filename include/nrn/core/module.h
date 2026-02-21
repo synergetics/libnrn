@@ -11,13 +11,13 @@
 namespace nrn {
 
 // ---------------------------------------------------------------------------
-// Operations table — like struct file_operations in the Linux kernel.
+// Operations table
 //
 // Every concrete module type (lif, adex, izhikevich, synapses, etc.)
 // provides a static instance of this struct with function pointers to
 // its implementations.
 // ---------------------------------------------------------------------------
-struct nrn_module_ops {
+struct nrn_ops {
     void (*forward)(void* self, State& state, double t, double dt);
     void (*reset)(void* self);
     const char** (*state_vars)(void* self, int* count);
@@ -33,7 +33,7 @@ struct nrn_module_ops {
 // ---------------------------------------------------------------------------
 struct NrnModule {
     void* impl;             // concrete struct (LIFNeuron*, AdExNeuron*, etc.)
-    nrn_module_ops* ops;    // dispatch table
+    nrn_ops* ops;           // dispatch table
 };
 
 // ---------------------------------------------------------------------------
