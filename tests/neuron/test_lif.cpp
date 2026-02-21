@@ -14,8 +14,9 @@ using namespace nrn::literals;
 
 TEST(LIF, DefaultConstruction) {
     // Creating a LIF population should not crash.
-    nrn::neuron::LIF lif(100);
-    EXPECT_EQ(lif->size(), 100);
+    auto* lif = neuron::lif_create(100);
+    EXPECT_EQ(lif->n, 100);
+    neuron::lif_destroy(lif);
 }
 
 TEST(LIF, ConstructionWithOptions) {
@@ -24,8 +25,9 @@ TEST(LIF, ConstructionWithOptions) {
         .v_thresh(-0.050)
         .tau_m(0.020);
 
-    nrn::neuron::LIF lif(50, opts);
-    EXPECT_EQ(lif->size(), 50);
+    auto* lif = neuron::lif_create(50, opts);
+    EXPECT_EQ(lif->n, 50);
+    neuron::lif_destroy(lif);
 }
 
 // ---------------------------------------------------------------------------
@@ -33,7 +35,7 @@ TEST(LIF, ConstructionWithOptions) {
 // ---------------------------------------------------------------------------
 
 TEST(LIF, ResetSetsVToVRest) {
-    nrn::neuron::LIF lif(100);
+    auto* lif = neuron::lif_create(100);
 
     // After construction, v should be at v_rest.
     auto v = lif->v;
@@ -44,14 +46,16 @@ TEST(LIF, ResetSetsVToVRest) {
 
     // All v values should equal v_rest.
     EXPECT_TRUE(torch::allclose(v, v_rest));
+    neuron::lif_destroy(lif);
 }
 
 TEST(LIF, ResetClearsSpikes) {
-    nrn::neuron::LIF lif(100);
+    auto* lif = neuron::lif_create(100);
 
     // Spikes should be zero after reset.
     auto spikes = lif->spike;
     EXPECT_TRUE(torch::all(spikes == 0).item<bool>());
+    neuron::lif_destroy(lif);
 }
 
 // ---------------------------------------------------------------------------
@@ -59,14 +63,16 @@ TEST(LIF, ResetClearsSpikes) {
 // ---------------------------------------------------------------------------
 
 TEST(LIF, StateVars) {
-    nrn::neuron::LIF lif(10);
-    auto vars = lif->state_vars();
+    auto* lif = neuron::lif_create(10);
+    int count = 0;
+    auto* vars = neuron::lif_state_vars(lif, &count);
     // Should include at least "v" and "spike".
     bool has_v = false, has_spike = false;
-    for (const auto& var : vars) {
-        if (var == "v") has_v = true;
-        if (var == "spike") has_spike = true;
+    for (int i = 0; i < count; ++i) {
+        if (std::string(vars[i]) == "v") has_v = true;
+        if (std::string(vars[i]) == "spike") has_spike = true;
     }
     EXPECT_TRUE(has_v);
     EXPECT_TRUE(has_spike);
+    neuron::lif_destroy(lif);
 }

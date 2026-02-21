@@ -8,45 +8,52 @@
 namespace nrn {
 
 // ---------------------------------------------------------------------------
-// Connection
+// Connection lifecycle
 // ---------------------------------------------------------------------------
 
-Connection::Connection(std::shared_ptr<Population> source,
-                       std::shared_ptr<Population> target,
-                       ConnectivityTensor connectivity,
-                       std::shared_ptr<torch::nn::Module> synapse,
-                       ConnectOptions options)
-    : source_(std::move(source)),
-      target_(std::move(target)),
-      connectivity_(std::move(connectivity)),
-      synapse_(std::move(synapse)),
-      options_(std::move(options)) {}
+Connection* connection_create(std::shared_ptr<Population> source,
+                              std::shared_ptr<Population> target,
+                              ConnectivityTensor connectivity,
+                              NrnModule synapse,
+                              ConnectOptions options) {
+    auto* conn = new Connection();
+    conn->source = std::move(source);
+    conn->target = std::move(target);
+    conn->connectivity = std::move(connectivity);
+    conn->synapse = synapse;
+    conn->options = std::move(options);
+    return conn;
+}
 
-void Connection::deliver(const torch::Tensor& spikes,
-                         Time /*t*/, Duration /*dt*/) {
-    // Get target population's I_syn via the State bag.
-    auto& target_state = target_->state();
-    if (!target_state.contains("I_syn")) {
-        return;  // Target state not yet initialized — skip.
+void connection_destroy(Connection* conn) {
+    delete conn;
+}
+
+// ---------------------------------------------------------------------------
+// Spike delivery — block-sparse matmul through CSR
+// ---------------------------------------------------------------------------
+
+void connection_deliver(Connection* conn, const torch::Tensor& spikes,
+                        double /*t*/, double /*dt*/) {
+    auto& target_state = conn->target->state;
+    if (!state_contains(target_state, "I_syn")) {
+        return;  // Target state not yet initialized.
     }
-    auto I_syn = target_state.get("I_syn");
+    auto I_syn = state_get(target_state, "I_syn");
 
-    // Compute effective connectivity: weights * structural_mask * modulatory_mask.
-    auto W_eff = connectivity_.effective_weights();
+    auto W_eff = conn->connectivity.effective_weights();
 
-    const auto& bi = connectivity_.block_index;
-    int64_t B = connectivity_.block_size;
-    int64_t n_src = connectivity_.n_source;
-    int64_t n_tgt = connectivity_.n_target;
+    const auto& bi = conn->connectivity.block_index;
+    int64_t B = conn->connectivity.block_size;
+    int64_t n_src = conn->connectivity.n_source;
+    int64_t n_tgt = conn->connectivity.n_target;
     int64_t n_tgt_blocks = bi.n_rows();
 
-    // Access CSR structure (on CPU for block iteration).
     auto row_ptr_cpu = bi.row_ptr.to(torch::kCPU);
     auto col_idx_cpu = bi.col_idx.to(torch::kCPU);
     auto rp = row_ptr_cpu.accessor<int32_t, 1>();
     auto ci = col_idx_cpu.accessor<int32_t, 1>();
 
-    // Iterate over target block rows using CSR structure.
     for (int64_t tr = 0; tr < n_tgt_blocks; ++tr) {
         int32_t block_start = rp[tr];
         int32_t block_end = rp[tr + 1];
@@ -62,31 +69,30 @@ void Connection::deliver(const torch::Tensor& spikes,
             int64_t s_end = std::min(s_begin + B, n_src);
             int64_t s_size = s_end - s_begin;
 
-            // Slice the block weight matrix to actual sizes.
             auto W_block = W_eff[bi_idx].slice(0, 0, t_size).slice(1, 0, s_size);
-
-            // Source spikes for this block.
             auto spike_block = spikes.slice(0, s_begin, s_end);
-
-            // Block matmul: [t_size, s_size] @ [s_size] -> [t_size]
             auto I_block = torch::mv(W_block, spike_block);
 
-            // Accumulate into target I_syn.
             I_syn.slice(0, t_begin, t_end) += I_block;
         }
     }
 }
 
-void Connection::attach(std::shared_ptr<PlasticityRule> rule) {
-    rule->initialize(connectivity_);
-    plasticity_rules_.push_back(std::move(rule));
+// ---------------------------------------------------------------------------
+// Plasticity
+// ---------------------------------------------------------------------------
+
+void connection_attach(Connection* conn, PlasticityRule rule) {
+    plasticity_initialize(&rule, conn->connectivity);
+    conn->plasticity_rules.push_back(rule);
 }
 
-void Connection::update_plasticity(const State& pre_state,
-                                   const State& post_state,
-                                   Time t, Duration dt) {
-    for (auto& rule : plasticity_rules_) {
-        rule->update(connectivity_, pre_state, post_state, t, dt);
+void connection_update_plasticity(Connection* conn,
+                                  const State& pre_state,
+                                  const State& post_state,
+                                  double t, double dt) {
+    for (auto& rule : conn->plasticity_rules) {
+        plasticity_update(&rule, conn->connectivity, pre_state, post_state, t, dt);
     }
 }
 
@@ -97,23 +103,23 @@ void Connection::update_plasticity(const State& pre_state,
 std::shared_ptr<Connection> connect(
     std::shared_ptr<Population> source,
     std::shared_ptr<Population> target,
-    TopologyGenerator& topology,
-    std::shared_ptr<torch::nn::Module> synapse,
+    TopologyGenerator* topology,
+    NrnModule synapse,
     const ConnectOptions& options) {
-    // Use the topology generator to create the block structure and masks.
-    // For now we pass CPU as default device; the caller can .to(device) later.
-    auto ct = topology.generate(
-        source->size(),
-        target->size(),
-        options.block_size(),
-        torch::kCPU);
+    auto ct = topology_generate(topology,
+                                source->n,
+                                target->n,
+                                options.block_size(),
+                                torch::kCPU);
 
-    return std::make_shared<Connection>(
+    auto* conn = connection_create(
         std::move(source),
         std::move(target),
         std::move(ct),
-        std::move(synapse),
+        synapse,
         options);
+
+    return std::shared_ptr<Connection>(conn, connection_destroy);
 }
 
 } // namespace nrn

@@ -3,7 +3,7 @@
 namespace nrn {
 namespace neuron {
 
-// Forward declaration of the CUDA kernel dispatch function.
+// CUDA kernel dispatch (defined in kernels/izhikevich_kernel.cu).
 namespace cuda {
 void izhikevich_forward_cuda(
     torch::Tensor v,
@@ -18,96 +18,121 @@ void izhikevich_forward_cuda(
     double dt);
 } // namespace cuda
 
-// ============================================================================
-// Constructors
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Ops table
+// ---------------------------------------------------------------------------
 
-IzhikevichImpl::IzhikevichImpl(int64_t n)
-    : IzhikevichImpl(n, IzhikevichOptions{}) {}
+nrn_module_ops izh_ops = {
+    .forward   = izh_forward,
+    .reset     = izh_reset,
+    .state_vars = izh_state_vars,
+    .size      = izh_size,
+    .to_device = izh_to_device,
+};
 
-IzhikevichImpl::IzhikevichImpl(int64_t n, IzhikevichOptions options)
-    : options_(std::move(options)) {
-    n_ = n;
-    reset();
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+IzhikevichNeuron* izh_create(int64_t n, IzhikevichOptions opts) {
+    auto* izh = new IzhikevichNeuron();
+    izh->n = n;
+    izh->options = std::move(opts);
+
+    auto topts = torch::TensorOptions().dtype(izh->options.dtype());
+
+    // State tensors
+    izh->v     = torch::full({n}, izh->options.v_init(), topts);
+    izh->u     = torch::full({n}, izh->options.b() * izh->options.v_init(), topts);
+    izh->spike = torch::zeros({n}, topts);
+    izh->I_syn = torch::zeros({n}, topts);
+
+    // Parameter tensors
+    izh->a      = torch::full({n}, izh->options.a(),      topts);
+    izh->b      = torch::full({n}, izh->options.b(),      topts);
+    izh->c      = torch::full({n}, izh->options.c(),      topts);
+    izh->d      = torch::full({n}, izh->options.d(),      topts);
+    izh->v_peak = torch::full({n}, izh->options.v_peak(), topts);
+
+    return izh;
 }
 
-// ============================================================================
-// reset()
-// ============================================================================
-
-void IzhikevichImpl::reset() {
-    auto opts = torch::TensorOptions().dtype(options_.dtype());
-
-    if (!v.defined()) {
-        // First call — register all buffers.
-        v     = register_buffer("v",     torch::full({n_}, options_.v_init(), opts));
-        u     = register_buffer("u",     torch::full({n_}, options_.b() * options_.v_init(), opts));
-        spike = register_buffer("spike", torch::zeros({n_}, opts));
-        I_syn = register_buffer("I_syn", torch::zeros({n_}, opts));
-
-        a      = register_buffer("a",      torch::full({n_}, options_.a(),      opts));
-        b      = register_buffer("b",      torch::full({n_}, options_.b(),      opts));
-        c      = register_buffer("c",      torch::full({n_}, options_.c(),      opts));
-        d      = register_buffer("d",      torch::full({n_}, options_.d(),      opts));
-        v_peak = register_buffer("v_peak", torch::full({n_}, options_.v_peak(), opts));
-    } else {
-        // Subsequent calls — reinitialize state in-place.
-        v.fill_(options_.v_init());
-        u.fill_(options_.b() * options_.v_init());
-        spike.zero_();
-        I_syn.zero_();
-    }
+void izh_destroy(IzhikevichNeuron* izh) {
+    delete izh;
 }
 
-// ============================================================================
-// forward()
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
 
-void IzhikevichImpl::forward(nrn::State& state, nrn::Time /*t*/, nrn::Duration dt) {
-    if (v.is_cuda()) {
-        cuda::izhikevich_forward_cuda(v, u, spike, I_syn,
-                                      a, b, c, d, v_peak, dt);
+void izh_forward(void* self, State& state, double /*t*/, double dt) {
+    auto* izh = static_cast<IzhikevichNeuron*>(self);
+
+    if (izh->v.is_cuda()) {
+        cuda::izhikevich_forward_cuda(izh->v, izh->u, izh->spike, izh->I_syn,
+                                      izh->a, izh->b, izh->c, izh->d,
+                                      izh->v_peak, dt);
     } else {
-        // CPU path: vectorized PyTorch tensor operations.
-        // Convert dt from SI seconds to model milliseconds.
+        // CPU path: vectorized tensor ops.
         double dt_ms = dt * 1000.0;
 
-        // Two half-steps for v (Izhikevich's recommended numerical scheme).
-        auto dv1 = 0.04 * v * v + 5.0 * v + 140.0 - u + I_syn;
-        v = v + 0.5 * dt_ms * dv1;
+        // Two half-steps for v (Izhikevich's recommended scheme).
+        auto dv1 = 0.04 * izh->v * izh->v + 5.0 * izh->v + 140.0 - izh->u + izh->I_syn;
+        izh->v = izh->v + 0.5 * dt_ms * dv1;
 
-        auto dv2 = 0.04 * v * v + 5.0 * v + 140.0 - u + I_syn;
-        v = v + 0.5 * dt_ms * dv2;
+        auto dv2 = 0.04 * izh->v * izh->v + 5.0 * izh->v + 140.0 - izh->u + izh->I_syn;
+        izh->v = izh->v + 0.5 * dt_ms * dv2;
 
         // Recovery variable.
-        auto du = dt_ms * a * (b * v - u);
-        u = u + du;
+        auto du = dt_ms * izh->a * (izh->b * izh->v - izh->u);
+        izh->u = izh->u + du;
 
         // Spike detection.
-        auto spiked = (v >= v_peak);
+        auto spiked = (izh->v >= izh->v_peak);
 
-        // Apply reset.
-        v = torch::where(spiked, c, v);
-        u = torch::where(spiked, u + d, u);
-        spike = spiked.to(v.dtype());
+        izh->v = torch::where(spiked, izh->c, izh->v);
+        izh->u = torch::where(spiked, izh->u + izh->d, izh->u);
+        izh->spike = spiked.to(izh->v.dtype());
 
-        // Consume synaptic current.
-        I_syn.zero_();
+        izh->I_syn.zero_();
     }
 
-    // Publish state into the State bag.
-    state.set("v", v);
-    state.set("u", u);
-    state.set("spike", spike);
-    state.set("I_syn", I_syn);
+    state_set(state, "v", izh->v);
+    state_set(state, "u", izh->u);
+    state_set(state, "spike", izh->spike);
+    state_set(state, "I_syn", izh->I_syn);
 }
 
-// ============================================================================
-// state_vars()
-// ============================================================================
+void izh_reset(void* self) {
+    auto* izh = static_cast<IzhikevichNeuron*>(self);
+    izh->v.fill_(izh->options.v_init());
+    izh->u.fill_(izh->options.b() * izh->options.v_init());
+    izh->spike.zero_();
+    izh->I_syn.zero_();
+}
 
-std::vector<std::string> IzhikevichImpl::state_vars() const {
-    return {"v", "u", "spike", "I_syn"};
+static const char* izh_var_names[] = {"v", "u", "spike", "I_syn"};
+
+const char** izh_state_vars(void* /*self*/, int* count) {
+    *count = 4;
+    return izh_var_names;
+}
+
+int64_t izh_size(void* self) {
+    return static_cast<IzhikevichNeuron*>(self)->n;
+}
+
+void izh_to_device(void* self, torch::Device device) {
+    auto* izh = static_cast<IzhikevichNeuron*>(self);
+    izh->v      = izh->v.to(device);
+    izh->u      = izh->u.to(device);
+    izh->spike  = izh->spike.to(device);
+    izh->I_syn  = izh->I_syn.to(device);
+    izh->a      = izh->a.to(device);
+    izh->b      = izh->b.to(device);
+    izh->c      = izh->c.to(device);
+    izh->d      = izh->d.to(device);
+    izh->v_peak = izh->v_peak.to(device);
 }
 
 } // namespace neuron

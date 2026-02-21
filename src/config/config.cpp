@@ -5,13 +5,13 @@
 namespace nrn {
 namespace config {
 
-Simulation load(const std::string& /*path*/) {
+Simulation* load(const std::string& /*path*/) {
     throw std::runtime_error(
         "nrn::config::load() not yet implemented — YAML config loading "
         "is planned for Phase 1");
 }
 
-Region load_region(const std::string& /*path*/) {
+Region* load_region(const std::string& /*path*/) {
     throw std::runtime_error(
         "nrn::config::load_region() not yet implemented — YAML config "
         "loading is planned for Phase 1");

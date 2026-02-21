@@ -1,8 +1,5 @@
 #pragma once
 
-#include <string>
-#include <vector>
-
 #include <torch/torch.h>
 
 #include <nrn/core/types.h>
@@ -28,54 +25,59 @@ namespace neuron {
 //   du/dt = a * (b*v - u)
 //
 //   if v >= v_peak:
-//       spike = 1
-//       v = c
-//       u = u + d
+//       spike = 1, v = c, u += d
 //
-// Note: dt in the forward() call is in seconds (SI), but the Izhikevich model
-// uses millisecond-scale dynamics internally. The kernel handles the conversion.
-//
+// Note: dt in forward() is seconds (SI); converted to ms internally.
 // Parameters stored as 1-D tensors [N] for per-neuron heterogeneity.
 // ============================================================================
-class IzhikevichImpl : public nrn::Module<IzhikevichImpl> {
-public:
-    /// Construct N Izhikevich neurons with default options (Regular Spiking).
-    explicit IzhikevichImpl(int64_t n);
 
-    /// Construct N Izhikevich neurons with the given options.
-    IzhikevichImpl(int64_t n, IzhikevichOptions options);
+struct IzhikevichNeuron {
+    int64_t n;
+    IzhikevichOptions options;
 
-    /// Initialize / reinitialize all state and parameter tensors.
-    void reset() override;
+    // State tensors [N]
+    torch::Tensor v;
+    torch::Tensor u;
+    torch::Tensor spike;
+    torch::Tensor I_syn;
 
-    /// Advance the neuron state by one timestep dt.
-    void forward(nrn::State& state, nrn::Time t, nrn::Duration dt) override;
-
-    /// Return the names of state variables managed by this module.
-    std::vector<std::string> state_vars() const override;
-
-    // ------------------------------------------------------------------
-    // State tensors (registered as buffers)
-    // ------------------------------------------------------------------
-    torch::Tensor v;      ///< Membrane potential  [N]
-    torch::Tensor u;      ///< Recovery variable   [N]
-    torch::Tensor spike;  ///< Spike indicator     [N]
-    torch::Tensor I_syn;  ///< Synaptic current    [N]
-
-    // ------------------------------------------------------------------
-    // Model parameter tensors (registered as buffers)
-    // ------------------------------------------------------------------
-    torch::Tensor a;      ///< Recovery time scale          [N]
-    torch::Tensor b;      ///< Recovery sensitivity to v    [N]
-    torch::Tensor c;      ///< Post-spike reset of v        [N]
-    torch::Tensor d;      ///< Post-spike increment of u    [N]
-    torch::Tensor v_peak; ///< Spike cutoff                 [N]
-
-private:
-    IzhikevichOptions options_;
+    // Parameter tensors [N]
+    torch::Tensor a;
+    torch::Tensor b;
+    torch::Tensor c;
+    torch::Tensor d;
+    torch::Tensor v_peak;
 };
 
-TORCH_MODULE(Izhikevich);
+// Lifecycle
+IzhikevichNeuron* izh_create(int64_t n, IzhikevichOptions opts = {});
+void izh_destroy(IzhikevichNeuron* izh);
+
+// Operations
+void izh_forward(void* self, State& state, double t, double dt);
+void izh_reset(void* self);
+const char** izh_state_vars(void* self, int* count);
+int64_t izh_size(void* self);
+void izh_to_device(void* self, torch::Device device);
+
+// Typed convenience wrappers
+inline void izh_forward(IzhikevichNeuron* izh, State& state, double t, double dt) {
+    izh_forward(static_cast<void*>(izh), state, t, dt);
+}
+inline void izh_reset(IzhikevichNeuron* izh) {
+    izh_reset(static_cast<void*>(izh));
+}
+inline void izh_to_device(IzhikevichNeuron* izh, torch::Device device) {
+    izh_to_device(static_cast<void*>(izh), device);
+}
+
+// Ops table
+extern nrn_module_ops izh_ops;
+
+// Wrap as generic module handle
+inline NrnModule izh_as_module(IzhikevichNeuron* izh) {
+    return NrnModule{static_cast<void*>(izh), &izh_ops};
+}
 
 } // namespace neuron
 } // namespace nrn

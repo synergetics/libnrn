@@ -22,6 +22,7 @@
 #include <nrn/connectivity/connect.h>
 #include <nrn/connectivity/topology/topology.h>
 #include <nrn/connectivity/topology/random.h>
+#include <nrn/connectivity/topology/distance_dependent.h>
 
 // Plasticity
 #include <nrn/plasticity/plasticity_rule.h>
@@ -39,3 +40,5 @@
 
 // Monitoring
 #include <nrn/monitor/recorder.h>
+#include <nrn/monitor/spike_recorder.h>
+#include <nrn/monitor/state_recorder.h>

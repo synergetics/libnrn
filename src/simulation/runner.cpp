@@ -10,44 +10,51 @@
 
 namespace nrn {
 
-Simulation::Simulation(Region region, SimulationOptions options)
-    : region_(std::move(region)),
-      options_(std::move(options)),
-      clock_(options_.dt_fast(),
-             options_.dt_slow(),
-             options_.dt_structural()) {
-    // Pre-create spike buffers for every population in the region.
-    if (region_) {
-        for (const auto& pop : region_->populations()) {
-            spike_buffers_.emplace(
-                pop->name(),
-                SpikeBuffer(pop->size(),
-                            options_.max_delay_steps(),
+// ------------------------------------------------------------------
+// Create / Destroy
+// ------------------------------------------------------------------
+
+Simulation* sim_create(Region* region, SimulationOptions options) {
+    auto* sim = new Simulation();
+    sim->region = region;
+    sim->options = std::move(options);
+    sim->clock = Clock(sim->options.dt_fast(),
+                       sim->options.dt_slow(),
+                       sim->options.dt_structural());
+
+    // Pre-create spike buffers for every population.
+    if (region) {
+        for (const auto& pop : region->populations) {
+            sim->spike_buffers.emplace(
+                pop->name,
+                SpikeBuffer(pop->n,
+                            sim->options.max_delay_steps(),
                             torch::kCPU));
         }
 
         // Initialize population states by calling forward(dt=0).
-        // This publishes initial tensors (v, spike, I_syn, etc.) into each
-        // population's State bag without changing any values.
-        for (auto& pop : region_->populations()) {
-            auto* mod = dynamic_cast<SteppableModule*>(pop->module().get());
-            if (mod) {
-                mod->forward(pop->state(), 0.0, 0.0);
-            }
+        for (auto& pop : region->populations) {
+            nrn_forward(&pop->module, pop->state, 0.0, 0.0);
         }
     }
+
+    return sim;
+}
+
+void sim_destroy(Simulation* sim) {
+    delete sim;
 }
 
 // ------------------------------------------------------------------
 // Recording
 // ------------------------------------------------------------------
 
-void Simulation::record(std::shared_ptr<Population> population,
-                        std::vector<std::string> variables,
-                        int64_t subsample) {
+void sim_record(Simulation* sim,
+                std::shared_ptr<Population> population,
+                std::vector<std::string> variables,
+                int64_t subsample) {
     TORCH_CHECK(population != nullptr, "Cannot record a null population");
 
-    // Check if "spike" is among the requested variables.
     bool wants_spikes = false;
     std::vector<std::string> state_vars;
     for (auto& v : variables) {
@@ -59,12 +66,13 @@ void Simulation::record(std::shared_ptr<Population> population,
     }
 
     if (wants_spikes) {
-        recorders_.push_back(std::make_shared<SpikeRecorder>(
-            population->name(), subsample));
+        auto* sr = spike_recorder_create(population->name, subsample);
+        sim->recorders.push_back(spike_recorder_as_recorder(sr));
     }
     if (!state_vars.empty()) {
-        recorders_.push_back(std::make_shared<StateRecorder>(
-            population->name(), std::move(state_vars), subsample));
+        auto* sr = state_recorder_create(population->name,
+                                         std::move(state_vars), subsample);
+        sim->recorders.push_back(state_recorder_as_recorder(sr));
     }
 }
 
@@ -72,159 +80,154 @@ void Simulation::record(std::shared_ptr<Population> population,
 // Running
 // ------------------------------------------------------------------
 
-void Simulation::run() {
+void sim_run(Simulation* sim) {
     int64_t total_steps = static_cast<int64_t>(
-        std::round(options_.duration() / options_.dt_fast()));
-    run_steps(total_steps);
+        std::round(sim->options.duration() / sim->options.dt_fast()));
+    sim_run_steps(sim, total_steps);
 }
 
-void Simulation::run_steps(int64_t n) {
+void sim_run_steps(Simulation* sim, int64_t n) {
     for (int64_t i = 0; i < n; ++i) {
-        step();
+        sim_step(sim);
     }
 }
 
-void Simulation::step() {
-    auto t = clock_.time();
-    auto dt = options_.dt_fast();
+void sim_step(Simulation* sim) {
+    auto t = sim->clock.time();
+    auto dt = sim->options.dt_fast();
 
     // --- Phase 1: Zero I_syn for all populations ---
-    for (auto& pop : region_->populations()) {
-        auto& s = pop->state();
-        if (s.contains("I_syn")) {
-            s.get("I_syn").zero_();
+    for (auto& pop : sim->region->populations) {
+        if (state_contains(pop->state, "I_syn")) {
+            state_get(pop->state, "I_syn").zero_();
         }
     }
 
     // --- Phase 2: Deliver spikes through all connections ---
-    for (auto& conn : region_->connections()) {
-        auto source_name = conn->source()->name();
+    for (auto& conn : sim->region->connections) {
+        auto& source_name = conn->source->name;
 
-        // Read source spikes from spike buffer (delay=1).
         torch::Tensor source_spikes;
-        auto it = spike_buffers_.find(source_name);
-        if (it != spike_buffers_.end()) {
+        auto it = sim->spike_buffers.find(source_name);
+        if (it != sim->spike_buffers.end()) {
             source_spikes = it->second.read(1);
         } else {
-            // Fallback: get spikes from source state.
-            auto& src_state = conn->source()->state();
-            if (src_state.contains("spike")) {
-                source_spikes = src_state.get("spike");
+            auto& src_state = conn->source->state;
+            if (state_contains(src_state, "spike")) {
+                source_spikes = state_get(src_state, "spike");
             } else {
                 continue;
             }
         }
 
-        conn->deliver(source_spikes, t, dt);
+        connection_deliver(conn.get(), source_spikes, t, dt);
     }
 
     // --- Phase 3: Forward-integrate all neuron populations ---
-    for (auto& pop : region_->populations()) {
-        auto* mod = dynamic_cast<SteppableModule*>(pop->module().get());
-        TORCH_CHECK(mod != nullptr,
-                    "Population '", pop->name(),
-                    "' module does not implement SteppableModule");
-        mod->forward(pop->state(), t, dt);
+    for (auto& pop : sim->region->populations) {
+        nrn_forward(&pop->module, pop->state, t, dt);
     }
 
     // --- Phase 4: Push spikes into spike buffers ---
-    for (auto& pop : region_->populations()) {
-        auto& s = pop->state();
-        if (s.contains("spike")) {
-            auto it = spike_buffers_.find(pop->name());
-            if (it != spike_buffers_.end()) {
-                it->second.push(s.get("spike"));
+    for (auto& pop : sim->region->populations) {
+        if (state_contains(pop->state, "spike")) {
+            auto it = sim->spike_buffers.find(pop->name);
+            if (it != sim->spike_buffers.end()) {
+                it->second.push(state_get(pop->state, "spike"));
             }
         }
     }
 
     // --- Phase 5: Plasticity updates (at slow boundary) ---
-    if (clock_.is_slow_boundary()) {
-        for (auto& conn : region_->connections()) {
-            conn->update_plasticity(
-                conn->source()->state(),
-                conn->target()->state(),
+    if (sim->clock.is_slow_boundary()) {
+        for (auto& conn : sim->region->connections) {
+            connection_update_plasticity(
+                conn.get(),
+                conn->source->state,
+                conn->target->state,
                 t, dt);
         }
     }
 
     // --- Phase 6: Record state ---
-    for (auto& rec : recorders_) {
-        for (auto& pop : region_->populations()) {
-            if (pop->name() == rec->population_name()) {
-                rec->record(pop->state(), t);
+    for (auto& rec : sim->recorders) {
+        for (auto& pop : sim->region->populations) {
+            const char* rec_name = rec.ops->population_name(rec.impl);
+            if (pop->name == rec_name) {
+                rec.ops->record(rec.impl, pop->state, t);
                 break;
             }
         }
     }
 
     // --- Phase 7: Callbacks ---
-    uint64_t step_num = clock_.step();
-    for (auto& [interval, callback] : callbacks_) {
+    uint64_t step_num = sim->clock.step();
+    for (auto& [interval, callback] : sim->callbacks) {
         if (step_num > 0 && (step_num % interval) == 0) {
-            callback(*this, t);
+            callback(*sim, t);
         }
     }
 
     // --- Advance clock ---
-    clock_.advance_fast();
+    sim->clock.advance_fast();
 }
 
 // ------------------------------------------------------------------
 // Data access
 // ------------------------------------------------------------------
 
-torch::Tensor Simulation::get_spikes(
-    const std::shared_ptr<Population>& population) const {
-    TORCH_CHECK(population != nullptr, "Cannot query spikes for null population");
-    for (const auto& rec : recorders_) {
-        if (rec->population_name() == population->name()) {
-            auto* sr = dynamic_cast<SpikeRecorder*>(rec.get());
-            if (sr) {
-                return sr->get_spikes();
+torch::Tensor sim_get_spikes(const Simulation* sim,
+                             const std::shared_ptr<Population>& population) {
+    TORCH_CHECK(population != nullptr,
+                "Cannot query spikes for null population");
+    for (const auto& rec : sim->recorders) {
+        const char* rec_name = rec.ops->population_name(rec.impl);
+        if (population->name == rec_name) {
+            // Check if this is a spike recorder by trying to cast.
+            // We stored the ops pointer, so we can compare it.
+            if (rec.ops == &spike_recorder_ops) {
+                auto* sr = static_cast<SpikeRecorderState*>(rec.impl);
+                return spike_recorder_get_spikes(sr);
             }
         }
     }
     TORCH_CHECK(false, "No spike recorder registered for population '",
-                population->name(), "'");
-    return {}; // unreachable
+                population->name, "'");
+    return {};
 }
 
-torch::Tensor Simulation::get_recorded(
-    const std::shared_ptr<Population>& population,
-    const std::string& variable) const {
+torch::Tensor sim_get_recorded(const Simulation* sim,
+                               const std::shared_ptr<Population>& population,
+                               const std::string& variable) {
     TORCH_CHECK(population != nullptr,
                 "Cannot query recorded data for null population");
-    for (const auto& rec : recorders_) {
-        if (rec->population_name() == population->name()) {
-            auto* sr = dynamic_cast<StateRecorder*>(rec.get());
-            if (sr) {
-                return sr->get(variable);
+    for (const auto& rec : sim->recorders) {
+        const char* rec_name = rec.ops->population_name(rec.impl);
+        if (population->name == rec_name) {
+            if (rec.ops == &state_recorder_ops) {
+                auto* sr = static_cast<StateRecorderState*>(rec.impl);
+                return state_recorder_get(sr, variable);
             }
         }
     }
     TORCH_CHECK(false, "No state recorder registered for population '",
-                population->name(), "' variable '", variable, "'");
-    return {}; // unreachable
+                population->name, "' variable '", variable, "'");
+    return {};
 }
 
 // ------------------------------------------------------------------
 // I/O
 // ------------------------------------------------------------------
 
-void Simulation::save(const std::string& /*path*/) const {
-    TORCH_CHECK(false,
-                "Simulation::save() not yet implemented — HDF5 output is "
-                "planned for Phase 1");
-}
+// save() — stub, not yet implemented.
 
 // ------------------------------------------------------------------
 // Callbacks
 // ------------------------------------------------------------------
 
-void Simulation::add_callback(int64_t every_n, Callback fn) {
+void sim_add_callback(Simulation* sim, int64_t every_n, SimCallback fn) {
     TORCH_CHECK(every_n > 0, "Callback interval must be positive");
-    callbacks_.emplace_back(every_n, std::move(fn));
+    sim->callbacks.emplace_back(every_n, std::move(fn));
 }
 
 } // namespace nrn

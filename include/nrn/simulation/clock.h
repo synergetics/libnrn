@@ -17,6 +17,10 @@ namespace nrn {
 /// GPU tensors.
 class Clock {
 public:
+    /// Default constructor — zero-initialized, must be reassigned before use.
+    Clock() : dt_fast_(0), dt_slow_(0), dt_structural_(0),
+              slow_ratio_(1), structural_ratio_(1) {}
+
     /// Construct a clock with the three timescale durations.
     ///
     /// `dt_slow` and `dt_structural` must be exact integer multiples of

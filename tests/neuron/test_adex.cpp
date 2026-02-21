@@ -14,8 +14,9 @@ using namespace nrn::literals;
 
 TEST(AdEx, DefaultConstruction) {
     // Creating an AdEx population should not crash.
-    nrn::neuron::AdEx adex(100);
-    EXPECT_EQ(adex->size(), 100);
+    auto* adex = neuron::adex_create(100);
+    EXPECT_EQ(adex->n, 100);
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, ConstructionWithOptions) {
@@ -27,15 +28,17 @@ TEST(AdEx, ConstructionWithOptions) {
         .b(80.5e-12)
         .delta_t(2.0_mV);
 
-    nrn::neuron::AdEx adex(80000, opts);
-    EXPECT_EQ(adex->size(), 80000);
+    auto* adex = neuron::adex_create(80000, opts);
+    EXPECT_EQ(adex->n, 80000);
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, SingleNeuron) {
-    nrn::neuron::AdEx adex(1);
-    EXPECT_EQ(adex->size(), 1);
+    auto* adex = neuron::adex_create(1);
+    EXPECT_EQ(adex->n, 1);
     EXPECT_EQ(adex->v.size(0), 1);
     EXPECT_EQ(adex->w.size(0), 1);
+    neuron::adex_destroy(adex);
 }
 
 // ---------------------------------------------------------------------------
@@ -43,17 +46,18 @@ TEST(AdEx, SingleNeuron) {
 // ---------------------------------------------------------------------------
 
 TEST(AdEx, StateTensorsShape) {
-    nrn::neuron::AdEx adex(200);
+    auto* adex = neuron::adex_create(200);
 
     EXPECT_EQ(adex->v.size(0), 200);
     EXPECT_EQ(adex->w.size(0), 200);
     EXPECT_EQ(adex->spike.size(0), 200);
     EXPECT_EQ(adex->refractory.size(0), 200);
     EXPECT_EQ(adex->I_syn.size(0), 200);
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, ParameterTensorsShape) {
-    nrn::neuron::AdEx adex(64);
+    auto* adex = neuron::adex_create(64);
 
     EXPECT_EQ(adex->v_rest.size(0), 64);
     EXPECT_EQ(adex->v_thresh.size(0), 64);
@@ -68,6 +72,7 @@ TEST(AdEx, ParameterTensorsShape) {
     EXPECT_EQ(adex->b.size(0), 64);
     EXPECT_EQ(adex->delta_t.size(0), 64);
     EXPECT_EQ(adex->i_bg.size(0), 64);
+    neuron::adex_destroy(adex);
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +80,7 @@ TEST(AdEx, ParameterTensorsShape) {
 // ---------------------------------------------------------------------------
 
 TEST(AdEx, ResetSetsVToVRest) {
-    nrn::neuron::AdEx adex(100);
+    auto* adex = neuron::adex_create(100);
 
     // After construction, v should be at v_rest.
     auto v = adex->v;
@@ -86,42 +91,47 @@ TEST(AdEx, ResetSetsVToVRest) {
 
     // All v values should equal v_rest.
     EXPECT_TRUE(torch::allclose(v, v_rest));
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, ResetClearsSpikes) {
-    nrn::neuron::AdEx adex(100);
+    auto* adex = neuron::adex_create(100);
 
     // Spikes should be zero after reset.
     auto spikes = adex->spike;
     EXPECT_TRUE(torch::all(spikes == 0).item<bool>());
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, ResetClearsAdaptation) {
-    nrn::neuron::AdEx adex(50);
+    auto* adex = neuron::adex_create(50);
 
     // Adaptation current w should be zero after reset.
     auto w = adex->w;
     EXPECT_TRUE(torch::all(w == 0).item<bool>());
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, ResetClearsRefractory) {
-    nrn::neuron::AdEx adex(50);
+    auto* adex = neuron::adex_create(50);
 
     // Refractory timer should be zero after reset.
     auto ref = adex->refractory;
     EXPECT_TRUE(torch::all(ref == 0).item<bool>());
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, ResetClearsSynapticCurrent) {
-    nrn::neuron::AdEx adex(50);
+    auto* adex = neuron::adex_create(50);
 
     // I_syn should be zero after reset.
     auto isyn = adex->I_syn;
     EXPECT_TRUE(torch::all(isyn == 0).item<bool>());
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, ExplicitResetRestoresState) {
-    nrn::neuron::AdEx adex(32);
+    auto* adex = neuron::adex_create(32);
 
     // Manually perturb state tensors.
     adex->v.fill_(0.0);
@@ -129,11 +139,12 @@ TEST(AdEx, ExplicitResetRestoresState) {
     adex->spike.fill_(1.0);
 
     // Reset should restore initial conditions.
-    adex->reset();
+    neuron::adex_reset(adex);
 
     EXPECT_TRUE(torch::allclose(adex->v, adex->v_rest));
     EXPECT_TRUE(torch::all(adex->w == 0).item<bool>());
     EXPECT_TRUE(torch::all(adex->spike == 0).item<bool>());
+    neuron::adex_destroy(adex);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +155,7 @@ TEST(AdEx, CustomOptionsPropagate) {
     double custom_v_rest = -75.0_mV;
     auto opts = neuron::AdExOptions().v_rest(custom_v_rest);
 
-    nrn::neuron::AdEx adex(10, opts);
+    auto* adex = neuron::adex_create(10, opts);
 
     // v_rest tensor should be filled with the custom value.
     auto v_rest_val = adex->v_rest[0].item<float>();
@@ -153,6 +164,7 @@ TEST(AdEx, CustomOptionsPropagate) {
     // v should also be initialized to custom v_rest.
     auto v_val = adex->v[0].item<float>();
     EXPECT_NEAR(v_val, static_cast<float>(custom_v_rest), 1e-6);
+    neuron::adex_destroy(adex);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,40 +172,46 @@ TEST(AdEx, CustomOptionsPropagate) {
 // ---------------------------------------------------------------------------
 
 TEST(AdEx, StateVars) {
-    nrn::neuron::AdEx adex(10);
-    auto vars = adex->state_vars();
+    auto* adex = neuron::adex_create(10);
+    int count = 0;
+    auto* vars = neuron::adex_state_vars(adex, &count);
     // Should include at least "v", "w", and "spike".
     bool has_v = false, has_w = false, has_spike = false;
-    for (const auto& var : vars) {
-        if (var == "v") has_v = true;
-        if (var == "w") has_w = true;
-        if (var == "spike") has_spike = true;
+    for (int i = 0; i < count; ++i) {
+        if (std::string(vars[i]) == "v") has_v = true;
+        if (std::string(vars[i]) == "w") has_w = true;
+        if (std::string(vars[i]) == "spike") has_spike = true;
     }
     EXPECT_TRUE(has_v);
     EXPECT_TRUE(has_w);
     EXPECT_TRUE(has_spike);
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, StateVarsIncludeISyn) {
-    nrn::neuron::AdEx adex(10);
-    auto vars = adex->state_vars();
+    auto* adex = neuron::adex_create(10);
+    int count = 0;
+    auto* vars = neuron::adex_state_vars(adex, &count);
 
     bool has_isyn = false;
-    for (const auto& var : vars) {
-        if (var == "I_syn") has_isyn = true;
+    for (int i = 0; i < count; ++i) {
+        if (std::string(vars[i]) == "I_syn") has_isyn = true;
     }
     EXPECT_TRUE(has_isyn);
+    neuron::adex_destroy(adex);
 }
 
 TEST(AdEx, StateVarsIncludeRefractory) {
-    nrn::neuron::AdEx adex(10);
-    auto vars = adex->state_vars();
+    auto* adex = neuron::adex_create(10);
+    int count = 0;
+    auto* vars = neuron::adex_state_vars(adex, &count);
 
     bool has_ref = false;
-    for (const auto& var : vars) {
-        if (var == "refractory") has_ref = true;
+    for (int i = 0; i < count; ++i) {
+        if (std::string(vars[i]) == "refractory") has_ref = true;
     }
     EXPECT_TRUE(has_ref);
+    neuron::adex_destroy(adex);
 }
 
 // ---------------------------------------------------------------------------

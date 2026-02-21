@@ -4,14 +4,32 @@
 
 namespace nrn {
 
-DistanceDependent::DistanceDependent(const DistanceDependentOptions& opts)
-    : opts_(opts) {}
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
-ConnectivityTensor DistanceDependent::generate(
-    int64_t n_source,
-    int64_t n_target,
-    int64_t block_size,
-    torch::Device device) {
+DistanceDepTopology* distance_dep_topology_create(
+    const DistanceDependentOptions& opts) {
+    auto* d = new DistanceDepTopology{};
+    d->opts = opts;
+    return d;
+}
+
+void distance_dep_topology_destroy(DistanceDepTopology* d) {
+    delete d;
+}
+
+// ---------------------------------------------------------------------------
+// Generate implementation (void* self -> DistanceDepTopology*)
+// ---------------------------------------------------------------------------
+
+ConnectivityTensor distance_dep_topology_generate(void* self,
+                                                   int64_t n_source,
+                                                   int64_t n_target,
+                                                   int64_t block_size,
+                                                   torch::Device device) {
+    auto* d = static_cast<DistanceDepTopology*>(self);
+    (void)d; // opts used below for the placeholder probability
 
     // Compute number of blocks in each dimension.
     int64_t n_src_blocks = (n_source + block_size - 1) / block_size;
@@ -30,8 +48,8 @@ ConnectivityTensor DistanceDependent::generate(
     auto ci = col_idx.accessor<int32_t, 1>();
 
     int32_t offset = 0;
-    for (int64_t r = 0; r < n_tgt_blocks; ++r) {
-        rp[r] = offset;
+    for (int64_t row = 0; row < n_tgt_blocks; ++row) {
+        rp[row] = offset;
         for (int64_t c = 0; c < n_src_blocks; ++c) {
             ci[offset] = static_cast<int32_t>(c);
             ++offset;
@@ -66,5 +84,22 @@ ConnectivityTensor DistanceDependent::generate(
 
     return ct;
 }
+
+// ---------------------------------------------------------------------------
+// Read-only accessor
+// ---------------------------------------------------------------------------
+
+const DistanceDependentOptions& distance_dep_topology_options(
+    const DistanceDepTopology* d) {
+    return d->opts;
+}
+
+// ---------------------------------------------------------------------------
+// Ops table
+// ---------------------------------------------------------------------------
+
+topology_ops distance_dep_topology_ops = {
+    distance_dep_topology_generate,
+};
 
 } // namespace nrn

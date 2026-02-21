@@ -4,14 +4,29 @@
 
 namespace nrn {
 
-Random::Random(const RandomTopologyOptions& opts)
-    : opts_(opts) {}
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
-ConnectivityTensor Random::generate(
-    int64_t n_source,
-    int64_t n_target,
-    int64_t block_size,
-    torch::Device device) {
+RandomTopology* random_topology_create(const RandomTopologyOptions& opts) {
+    auto* r = new RandomTopology{};
+    r->opts = opts;
+    return r;
+}
+
+void random_topology_destroy(RandomTopology* r) {
+    delete r;
+}
+
+// ---------------------------------------------------------------------------
+// Generate implementation (void* self -> RandomTopology*)
+// ---------------------------------------------------------------------------
+
+ConnectivityTensor random_topology_generate(void* self, int64_t n_source,
+                                            int64_t n_target,
+                                            int64_t block_size,
+                                            torch::Device device) {
+    auto* r = static_cast<RandomTopology*>(self);
 
     // Compute number of blocks in each dimension (ceil division).
     int64_t n_src_blocks = (n_source + block_size - 1) / block_size;
@@ -28,8 +43,8 @@ ConnectivityTensor Random::generate(
     auto ci = col_idx.accessor<int32_t, 1>();
 
     int32_t offset = 0;
-    for (int64_t r = 0; r < n_tgt_blocks; ++r) {
-        rp[r] = offset;
+    for (int64_t row = 0; row < n_tgt_blocks; ++row) {
+        rp[row] = offset;
         for (int64_t c = 0; c < n_src_blocks; ++c) {
             ci[offset] = static_cast<int32_t>(c);
             ++offset;
@@ -51,10 +66,11 @@ ConnectivityTensor Random::generate(
 
     // Structural mask: Bernoulli with probability p.
     ct.structural_mask = torch::bernoulli(
-        torch::full({n_blocks, block_size, block_size}, opts_.probability(), topts));
+        torch::full({n_blocks, block_size, block_size},
+                    r->opts.probability(), topts));
 
     // Remove autapses if same population (diagonal blocks, i==j).
-    if (!opts_.allow_autapses() && n_source == n_target) {
+    if (!r->opts.allow_autapses() && n_source == n_target) {
         for (int64_t b = 0; b < std::min(n_src_blocks, n_tgt_blocks); ++b) {
             int64_t block_idx = b * n_src_blocks + b;
             if (block_idx < n_blocks) {
@@ -77,5 +93,21 @@ ConnectivityTensor Random::generate(
 
     return ct;
 }
+
+// ---------------------------------------------------------------------------
+// Read-only accessor
+// ---------------------------------------------------------------------------
+
+const RandomTopologyOptions& random_topology_options(const RandomTopology* r) {
+    return r->opts;
+}
+
+// ---------------------------------------------------------------------------
+// Ops table
+// ---------------------------------------------------------------------------
+
+topology_ops random_topology_ops = {
+    random_topology_generate,
+};
 
 } // namespace nrn

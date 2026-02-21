@@ -1,8 +1,5 @@
 #pragma once
 
-#include <string>
-#include <vector>
-
 #include <torch/torch.h>
 
 #include <nrn/core/types.h>
@@ -30,61 +27,67 @@ namespace neuron {
 //   tau_w * dw/dt = a*(v - v_rest) - w
 //
 //   if v >= v_peak:
-//       spike = 1
-//       v = v_reset
-//       w += b
-//       refractory = tau_ref
+//       spike = 1, v = v_reset, w += b, refractory = tau_ref
 //
 // Parameters stored as 1-D tensors [N] for per-neuron heterogeneity.
 // ============================================================================
-class AdExImpl : public nrn::Module<AdExImpl> {
-public:
-    /// Construct N AdEx neurons with default options.
-    explicit AdExImpl(int64_t n);
 
-    /// Construct N AdEx neurons with the given options.
-    AdExImpl(int64_t n, AdExOptions options);
+struct AdExNeuron {
+    int64_t n;
+    AdExOptions options;
 
-    /// Initialize / reinitialize all state and parameter tensors.
-    void reset() override;
+    // State tensors [N]
+    torch::Tensor v;
+    torch::Tensor w;
+    torch::Tensor spike;
+    torch::Tensor refractory;
+    torch::Tensor I_syn;
 
-    /// Advance the neuron state by one timestep dt.
-    void forward(nrn::State& state, nrn::Time t, nrn::Duration dt) override;
-
-    /// Return the names of state variables managed by this module.
-    std::vector<std::string> state_vars() const override;
-
-    // ------------------------------------------------------------------
-    // State tensors (registered as buffers)
-    // ------------------------------------------------------------------
-    torch::Tensor v;          ///< Membrane potential   [N]
-    torch::Tensor w;          ///< Adaptation current   [N]
-    torch::Tensor spike;      ///< Spike indicator      [N]
-    torch::Tensor refractory; ///< Refractory timer     [N]
-    torch::Tensor I_syn;      ///< Synaptic current     [N]
-
-    // ------------------------------------------------------------------
-    // Model parameter tensors (registered as buffers)
-    // ------------------------------------------------------------------
-    torch::Tensor v_rest;     ///< Resting potential        [N]
-    torch::Tensor v_thresh;   ///< Effective threshold      [N]
-    torch::Tensor v_reset;    ///< Reset potential           [N]
-    torch::Tensor v_peak;     ///< Spike cutoff / peak      [N]
-    torch::Tensor tau_m;      ///< Membrane time constant   [N]
-    torch::Tensor tau_w;      ///< Adaptation time constant [N]
-    torch::Tensor tau_ref;    ///< Refractory period        [N]
-    torch::Tensor c_m;        ///< Membrane capacitance     [N]
-    torch::Tensor g_l;        ///< Leak conductance         [N]
-    torch::Tensor a;          ///< Subthreshold adaptation  [N]
-    torch::Tensor b;          ///< Spike-triggered adapt.   [N]
-    torch::Tensor delta_t;    ///< Exponential slope factor [N]
-    torch::Tensor i_bg;       ///< Background current       [N]
-
-private:
-    AdExOptions options_;
+    // Parameter tensors [N]
+    torch::Tensor v_rest;
+    torch::Tensor v_thresh;
+    torch::Tensor v_reset;
+    torch::Tensor v_peak;
+    torch::Tensor tau_m;
+    torch::Tensor tau_w;
+    torch::Tensor tau_ref;
+    torch::Tensor c_m;
+    torch::Tensor g_l;
+    torch::Tensor a;
+    torch::Tensor b;
+    torch::Tensor delta_t;
+    torch::Tensor i_bg;
 };
 
-TORCH_MODULE(AdEx);
+// Lifecycle
+AdExNeuron* adex_create(int64_t n, AdExOptions opts = {});
+void adex_destroy(AdExNeuron* adex);
+
+// Operations
+void adex_forward(void* self, State& state, double t, double dt);
+void adex_reset(void* self);
+const char** adex_state_vars(void* self, int* count);
+int64_t adex_size(void* self);
+void adex_to_device(void* self, torch::Device device);
+
+// Typed convenience wrappers
+inline void adex_forward(AdExNeuron* adex, State& state, double t, double dt) {
+    adex_forward(static_cast<void*>(adex), state, t, dt);
+}
+inline void adex_reset(AdExNeuron* adex) {
+    adex_reset(static_cast<void*>(adex));
+}
+inline void adex_to_device(AdExNeuron* adex, torch::Device device) {
+    adex_to_device(static_cast<void*>(adex), device);
+}
+
+// Ops table
+extern nrn_module_ops adex_ops;
+
+// Wrap as generic module handle
+inline NrnModule adex_as_module(AdExNeuron* adex) {
+    return NrnModule{static_cast<void*>(adex), &adex_ops};
+}
 
 } // namespace neuron
 } // namespace nrn

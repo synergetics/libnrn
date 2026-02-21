@@ -1,7 +1,7 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
-#include <vector>
 
 #include <torch/torch.h>
 
@@ -10,52 +10,54 @@
 
 namespace nrn {
 
-/// Non-template abstract interface for modules that can be stepped in time.
-///
-/// This enables Simulation::step() to call forward() through a
-/// torch::nn::Module pointer via dynamic_cast<SteppableModule*>.
-class SteppableModule {
-public:
-    virtual ~SteppableModule() = default;
-    virtual void forward(State& state, Time t, Duration dt) = 0;
-    virtual std::vector<std::string> state_vars() const = 0;
-    virtual int64_t size() const = 0;
+// ---------------------------------------------------------------------------
+// Operations table — like struct file_operations in the Linux kernel.
+//
+// Every concrete module type (lif, adex, izhikevich, synapses, etc.)
+// provides a static instance of this struct with function pointers to
+// its implementations.
+// ---------------------------------------------------------------------------
+struct nrn_module_ops {
+    void (*forward)(void* self, State& state, double t, double dt);
+    void (*reset)(void* self);
+    const char** (*state_vars)(void* self, int* count);
+    int64_t (*size)(void* self);
+    void (*to_device)(void* self, torch::Device device);
 };
 
-/// CRTP base module for all simulation components.
-///
-/// Inherits from torch::nn::Cloneable<Derived> to get parameter registration,
-/// serialization, device transfer, and the TORCH_MODULE wrapper pattern.
-/// Also inherits SteppableModule for type-erased virtual dispatch.
-///
-/// Derived classes must implement:
-///   - reset()                          — initialize/reinitialize parameters
-///   - forward(State&, Time, Duration)  — advance state by one timestep
-///   - state_vars()                     — list the names of state variables
-template <typename Derived>
-class Module : public torch::nn::Cloneable<Derived>,
-               public SteppableModule {
-public:
-    using torch::nn::Cloneable<Derived>::Cloneable;
-
-    /// Advance the module state by one timestep.
-    /// Subclasses override this to implement their dynamics.
-    void forward(State& state, Time t, Duration dt) override {
-        TORCH_CHECK(false,
-                    "forward() not implemented for module '",
-                    this->name(), "'");
-    }
-
-    /// Return the list of state variable names this module manages.
-    std::vector<std::string> state_vars() const override {
-        return {};
-    }
-
-    /// Return the number of cells / units in this module.
-    int64_t size() const override { return n_; }
-
-protected:
-    int64_t n_ = 0; ///< Number of neurons / cells / units.
+// ---------------------------------------------------------------------------
+// NrnModule — type-erased handle to any module.
+//
+// Population and Simulation use this to dispatch without knowing the
+// concrete type. Equivalent to a void* + vtable pointer, but explicit.
+// ---------------------------------------------------------------------------
+struct NrnModule {
+    void* impl;             // concrete struct (LIFNeuron*, AdExNeuron*, etc.)
+    nrn_module_ops* ops;    // dispatch table
 };
+
+// ---------------------------------------------------------------------------
+// Dispatch convenience functions
+// ---------------------------------------------------------------------------
+
+inline void nrn_forward(NrnModule* m, State& state, double t, double dt) {
+    m->ops->forward(m->impl, state, t, dt);
+}
+
+inline void nrn_reset(NrnModule* m) {
+    m->ops->reset(m->impl);
+}
+
+inline int64_t nrn_size(NrnModule* m) {
+    return m->ops->size(m->impl);
+}
+
+inline void nrn_to_device(NrnModule* m, torch::Device device) {
+    m->ops->to_device(m->impl, device);
+}
+
+inline const char** nrn_state_vars(NrnModule* m, int* count) {
+    return m->ops->state_vars(m->impl, count);
+}
 
 } // namespace nrn

@@ -3,7 +3,7 @@
 namespace nrn {
 namespace neuron {
 
-// Forward declaration of the CUDA kernel dispatch function.
+// CUDA kernel dispatch (defined in kernels/adex_kernel.cu).
 namespace cuda {
 void adex_forward_cuda(
     torch::Tensor v,
@@ -27,114 +27,149 @@ void adex_forward_cuda(
     double dt);
 } // namespace cuda
 
-// ============================================================================
-// Constructors
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Ops table
+// ---------------------------------------------------------------------------
 
-AdExImpl::AdExImpl(int64_t n)
-    : AdExImpl(n, AdExOptions{}) {}
+nrn_module_ops adex_ops = {
+    .forward   = adex_forward,
+    .reset     = adex_reset,
+    .state_vars = adex_state_vars,
+    .size      = adex_size,
+    .to_device = adex_to_device,
+};
 
-AdExImpl::AdExImpl(int64_t n, AdExOptions options)
-    : options_(std::move(options)) {
-    n_ = n;
-    reset();
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+AdExNeuron* adex_create(int64_t n, AdExOptions opts) {
+    auto* adex = new AdExNeuron();
+    adex->n = n;
+    adex->options = std::move(opts);
+
+    auto topts = torch::TensorOptions().dtype(adex->options.dtype());
+
+    // State tensors
+    adex->v          = torch::full({n}, adex->options.v_rest(), topts);
+    adex->w          = torch::zeros({n}, topts);
+    adex->spike      = torch::zeros({n}, topts);
+    adex->refractory = torch::zeros({n}, topts);
+    adex->I_syn      = torch::zeros({n}, topts);
+
+    // Parameter tensors
+    adex->v_rest  = torch::full({n}, adex->options.v_rest(),  topts);
+    adex->v_thresh = torch::full({n}, adex->options.v_thresh(), topts);
+    adex->v_reset = torch::full({n}, adex->options.v_reset(), topts);
+    adex->v_peak  = torch::full({n}, adex->options.v_peak(),  topts);
+    adex->tau_m   = torch::full({n}, adex->options.tau_m(),   topts);
+    adex->tau_w   = torch::full({n}, adex->options.tau_w(),   topts);
+    adex->tau_ref = torch::full({n}, adex->options.tau_ref(), topts);
+    adex->c_m     = torch::full({n}, adex->options.c_m(),     topts);
+    adex->g_l     = torch::full({n}, adex->options.g_l(),     topts);
+    adex->a       = torch::full({n}, adex->options.a(),       topts);
+    adex->b       = torch::full({n}, adex->options.b(),       topts);
+    adex->delta_t = torch::full({n}, adex->options.delta_t(), topts);
+    adex->i_bg    = torch::full({n}, adex->options.i_bg(),    topts);
+
+    return adex;
 }
 
-// ============================================================================
-// reset()
-// ============================================================================
-
-void AdExImpl::reset() {
-    auto opts = torch::TensorOptions().dtype(options_.dtype());
-
-    if (!v.defined()) {
-        // First call — register all buffers.
-        v          = register_buffer("v",          torch::full({n_}, options_.v_rest(), opts));
-        w          = register_buffer("w",          torch::zeros({n_}, opts));
-        spike      = register_buffer("spike",      torch::zeros({n_}, opts));
-        refractory = register_buffer("refractory", torch::zeros({n_}, opts));
-        I_syn      = register_buffer("I_syn",      torch::zeros({n_}, opts));
-
-        v_rest  = register_buffer("v_rest",  torch::full({n_}, options_.v_rest(),  opts));
-        v_thresh = register_buffer("v_thresh", torch::full({n_}, options_.v_thresh(), opts));
-        v_reset = register_buffer("v_reset", torch::full({n_}, options_.v_reset(), opts));
-        v_peak  = register_buffer("v_peak",  torch::full({n_}, options_.v_peak(),  opts));
-        tau_m   = register_buffer("tau_m",   torch::full({n_}, options_.tau_m(),   opts));
-        tau_w   = register_buffer("tau_w",   torch::full({n_}, options_.tau_w(),   opts));
-        tau_ref = register_buffer("tau_ref", torch::full({n_}, options_.tau_ref(), opts));
-        c_m     = register_buffer("c_m",     torch::full({n_}, options_.c_m(),     opts));
-        g_l     = register_buffer("g_l",     torch::full({n_}, options_.g_l(),     opts));
-        a       = register_buffer("a",       torch::full({n_}, options_.a(),       opts));
-        b       = register_buffer("b",       torch::full({n_}, options_.b(),       opts));
-        delta_t = register_buffer("delta_t", torch::full({n_}, options_.delta_t(), opts));
-        i_bg    = register_buffer("i_bg",    torch::full({n_}, options_.i_bg(),    opts));
-    } else {
-        // Subsequent calls — reinitialize state in-place.
-        v.fill_(options_.v_rest());
-        w.zero_();
-        spike.zero_();
-        refractory.zero_();
-        I_syn.zero_();
-    }
+void adex_destroy(AdExNeuron* adex) {
+    delete adex;
 }
 
-// ============================================================================
-// forward()
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
 
-void AdExImpl::forward(nrn::State& state, nrn::Time /*t*/, nrn::Duration dt) {
-    if (v.is_cuda()) {
-        cuda::adex_forward_cuda(v, w, spike, refractory, I_syn,
-                                v_rest, v_thresh, v_reset, v_peak,
-                                tau_m, tau_w, tau_ref, c_m, g_l,
-                                a, b, delta_t, i_bg, dt);
+void adex_forward(void* self, State& state, double /*t*/, double dt) {
+    auto* adex = static_cast<AdExNeuron*>(self);
+
+    if (adex->v.is_cuda()) {
+        cuda::adex_forward_cuda(adex->v, adex->w, adex->spike, adex->refractory,
+                                adex->I_syn, adex->v_rest, adex->v_thresh,
+                                adex->v_reset, adex->v_peak, adex->tau_m,
+                                adex->tau_w, adex->tau_ref, adex->c_m,
+                                adex->g_l, adex->a, adex->b, adex->delta_t,
+                                adex->i_bg, dt);
     } else {
-        // CPU path: vectorized PyTorch tensor operations.
-        auto active = (refractory <= 0);
+        // CPU path: vectorized tensor ops.
+        auto active = (adex->refractory <= 0);
 
-        // Decrement refractory timers.
-        refractory = torch::where(refractory > 0,
-                                  refractory - dt,
-                                  refractory);
+        adex->refractory = torch::where(adex->refractory > 0,
+                                        adex->refractory - dt,
+                                        adex->refractory);
 
         // Exponential spike-initiation current.
-        auto I_exp = g_l * delta_t * torch::exp((v - v_thresh) / delta_t);
+        auto I_exp = adex->g_l * adex->delta_t
+                     * torch::exp((adex->v - adex->v_thresh) / adex->delta_t);
 
-        // Forward Euler: membrane potential (only non-refractory).
-        auto dv = dt * (-g_l * (v - v_rest) + I_exp - w + I_syn + i_bg) / c_m;
-        v = torch::where(active, v + dv, v);
+        auto dv = dt * (-adex->g_l * (adex->v - adex->v_rest) + I_exp
+                        - adex->w + adex->I_syn + adex->i_bg) / adex->c_m;
+        adex->v = torch::where(active, adex->v + dv, adex->v);
 
-        // Adaptation dynamics — evolves even during refractory.
-        auto dw = dt * (a * (v - v_rest) - w) / tau_w;
-        w = w + dw;
+        // Adaptation — evolves even during refractory.
+        auto dw = dt * (adex->a * (adex->v - adex->v_rest) - adex->w) / adex->tau_w;
+        adex->w = adex->w + dw;
 
-        // Spike detection (only non-refractory neurons can spike).
-        auto spiked = (v >= v_peak) & active;
+        auto spiked = (adex->v >= adex->v_peak) & active;
 
-        // Apply reset.
-        v = torch::where(spiked, v_reset, v);
-        w = torch::where(spiked, w + b, w);
-        refractory = torch::where(spiked, tau_ref, refractory);
-        spike = spiked.to(v.dtype());
+        adex->v = torch::where(spiked, adex->v_reset, adex->v);
+        adex->w = torch::where(spiked, adex->w + adex->b, adex->w);
+        adex->refractory = torch::where(spiked, adex->tau_ref, adex->refractory);
+        adex->spike = spiked.to(adex->v.dtype());
 
-        // Consume synaptic current.
-        I_syn.zero_();
+        adex->I_syn.zero_();
     }
 
-    // Publish state into the State bag.
-    state.set("v", v);
-    state.set("w", w);
-    state.set("spike", spike);
-    state.set("refractory", refractory);
-    state.set("I_syn", I_syn);
+    state_set(state, "v", adex->v);
+    state_set(state, "w", adex->w);
+    state_set(state, "spike", adex->spike);
+    state_set(state, "refractory", adex->refractory);
+    state_set(state, "I_syn", adex->I_syn);
 }
 
-// ============================================================================
-// state_vars()
-// ============================================================================
+void adex_reset(void* self) {
+    auto* adex = static_cast<AdExNeuron*>(self);
+    adex->v.fill_(adex->options.v_rest());
+    adex->w.zero_();
+    adex->spike.zero_();
+    adex->refractory.zero_();
+    adex->I_syn.zero_();
+}
 
-std::vector<std::string> AdExImpl::state_vars() const {
-    return {"v", "w", "spike", "refractory", "I_syn"};
+static const char* adex_var_names[] = {"v", "w", "spike", "refractory", "I_syn"};
+
+const char** adex_state_vars(void* /*self*/, int* count) {
+    *count = 5;
+    return adex_var_names;
+}
+
+int64_t adex_size(void* self) {
+    return static_cast<AdExNeuron*>(self)->n;
+}
+
+void adex_to_device(void* self, torch::Device device) {
+    auto* adex = static_cast<AdExNeuron*>(self);
+    adex->v          = adex->v.to(device);
+    adex->w          = adex->w.to(device);
+    adex->spike      = adex->spike.to(device);
+    adex->refractory = adex->refractory.to(device);
+    adex->I_syn      = adex->I_syn.to(device);
+    adex->v_rest     = adex->v_rest.to(device);
+    adex->v_thresh   = adex->v_thresh.to(device);
+    adex->v_reset    = adex->v_reset.to(device);
+    adex->v_peak     = adex->v_peak.to(device);
+    adex->tau_m      = adex->tau_m.to(device);
+    adex->tau_w      = adex->tau_w.to(device);
+    adex->tau_ref    = adex->tau_ref.to(device);
+    adex->c_m        = adex->c_m.to(device);
+    adex->g_l        = adex->g_l.to(device);
+    adex->a          = adex->a.to(device);
+    adex->b          = adex->b.to(device);
+    adex->delta_t    = adex->delta_t.to(device);
+    adex->i_bg       = adex->i_bg.to(device);
 }
 
 } // namespace neuron

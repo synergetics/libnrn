@@ -3,7 +3,7 @@
 namespace nrn {
 namespace neuron {
 
-// Forward declaration of the CUDA kernel dispatch function.
+// CUDA kernel dispatch (defined in kernels/lif_kernel.cu).
 namespace cuda {
 void lif_forward_cuda(
     torch::Tensor v,
@@ -20,96 +20,122 @@ void lif_forward_cuda(
     double dt);
 } // namespace cuda
 
-// ============================================================================
-// Constructors
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Ops table
+// ---------------------------------------------------------------------------
 
-LIFImpl::LIFImpl(int64_t n)
-    : LIFImpl(n, LIFOptions{}) {}
+nrn_module_ops lif_ops = {
+    .forward   = lif_forward,
+    .reset     = lif_reset,
+    .state_vars = lif_state_vars,
+    .size      = lif_size,
+    .to_device = lif_to_device,
+};
 
-LIFImpl::LIFImpl(int64_t n, LIFOptions options)
-    : options_(std::move(options)) {
-    n_ = n;
-    reset();
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+LIFNeuron* lif_create(int64_t n, LIFOptions opts) {
+    auto* lif = new LIFNeuron();
+    lif->n = n;
+    lif->options = std::move(opts);
+
+    auto topts = torch::TensorOptions().dtype(lif->options.dtype());
+
+    // State tensors
+    lif->v          = torch::full({n}, lif->options.v_rest(), topts);
+    lif->spike      = torch::zeros({n}, topts);
+    lif->refractory = torch::zeros({n}, topts);
+    lif->I_syn      = torch::zeros({n}, topts);
+
+    // Parameter tensors
+    lif->v_rest  = torch::full({n}, lif->options.v_rest(),  topts);
+    lif->v_thresh = torch::full({n}, lif->options.v_thresh(), topts);
+    lif->v_reset = torch::full({n}, lif->options.v_reset(), topts);
+    lif->tau_m   = torch::full({n}, lif->options.tau_m(),   topts);
+    lif->tau_ref = torch::full({n}, lif->options.tau_ref(), topts);
+    lif->c_m     = torch::full({n}, lif->options.c_m(),     topts);
+    lif->i_bg    = torch::full({n}, lif->options.i_bg(),    topts);
+
+    return lif;
 }
 
-// ============================================================================
-// reset()
-// ============================================================================
+void lif_destroy(LIFNeuron* lif) {
+    delete lif;
+}
 
-void LIFImpl::reset() {
-    auto opts = torch::TensorOptions().dtype(options_.dtype());
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
 
-    if (!v.defined()) {
-        // First call — register all buffers.
-        v          = register_buffer("v",          torch::full({n_}, options_.v_rest(), opts));
-        spike      = register_buffer("spike",      torch::zeros({n_}, opts));
-        refractory = register_buffer("refractory", torch::zeros({n_}, opts));
-        I_syn      = register_buffer("I_syn",      torch::zeros({n_}, opts));
+void lif_forward(void* self, State& state, double /*t*/, double dt) {
+    auto* lif = static_cast<LIFNeuron*>(self);
 
-        v_rest  = register_buffer("v_rest",  torch::full({n_}, options_.v_rest(),  opts));
-        v_thresh = register_buffer("v_thresh", torch::full({n_}, options_.v_thresh(), opts));
-        v_reset = register_buffer("v_reset", torch::full({n_}, options_.v_reset(), opts));
-        tau_m   = register_buffer("tau_m",   torch::full({n_}, options_.tau_m(),   opts));
-        tau_ref = register_buffer("tau_ref", torch::full({n_}, options_.tau_ref(), opts));
-        c_m     = register_buffer("c_m",     torch::full({n_}, options_.c_m(),     opts));
-        i_bg    = register_buffer("i_bg",    torch::full({n_}, options_.i_bg(),    opts));
+    if (lif->v.is_cuda()) {
+        cuda::lif_forward_cuda(lif->v, lif->spike, lif->refractory, lif->I_syn,
+                               lif->v_rest, lif->v_thresh, lif->v_reset,
+                               lif->tau_m, lif->tau_ref, lif->c_m, lif->i_bg, dt);
     } else {
-        // Subsequent calls — reinitialize state in-place.
-        v.fill_(options_.v_rest());
-        spike.zero_();
-        refractory.zero_();
-        I_syn.zero_();
-    }
-}
+        // CPU path: vectorized tensor ops.
+        auto active = (lif->refractory <= 0);
 
-// ============================================================================
-// forward()
-// ============================================================================
+        lif->refractory = torch::where(lif->refractory > 0,
+                                       lif->refractory - dt,
+                                       lif->refractory);
 
-void LIFImpl::forward(nrn::State& state, nrn::Time /*t*/, nrn::Duration dt) {
-    if (v.is_cuda()) {
-        cuda::lif_forward_cuda(v, spike, refractory, I_syn,
-                               v_rest, v_thresh, v_reset,
-                               tau_m, tau_ref, c_m, i_bg, dt);
-    } else {
-        // CPU path: vectorized PyTorch tensor operations.
-        auto active = (refractory <= 0);
+        auto dv = dt * (-(lif->v - lif->v_rest) / lif->tau_m
+                        + (lif->I_syn + lif->i_bg) / lif->c_m);
+        lif->v = torch::where(active, lif->v + dv, lif->v);
 
-        // Decrement refractory timers for neurons still in refractory.
-        refractory = torch::where(refractory > 0,
-                                  refractory - dt,
-                                  refractory);
+        auto spiked = (lif->v >= lif->v_thresh) & active;
 
-        // Forward Euler integration of membrane potential.
-        auto dv = dt * (-(v - v_rest) / tau_m + (I_syn + i_bg) / c_m);
-        v = torch::where(active, v + dv, v);
+        lif->v = torch::where(spiked, lif->v_reset, lif->v);
+        lif->refractory = torch::where(spiked, lif->tau_ref, lif->refractory);
+        lif->spike = spiked.to(lif->v.dtype());
 
-        // Spike detection (only non-refractory neurons can spike).
-        auto spiked = (v >= v_thresh) & active;
-
-        // Apply reset.
-        v = torch::where(spiked, v_reset, v);
-        refractory = torch::where(spiked, tau_ref, refractory);
-        spike = spiked.to(v.dtype());
-
-        // Consume synaptic current.
-        I_syn.zero_();
+        lif->I_syn.zero_();
     }
 
-    // Publish state tensors into the State bag.
-    state.set("v", v);
-    state.set("spike", spike);
-    state.set("refractory", refractory);
-    state.set("I_syn", I_syn);
+    // Publish state.
+    state_set(state, "v", lif->v);
+    state_set(state, "spike", lif->spike);
+    state_set(state, "refractory", lif->refractory);
+    state_set(state, "I_syn", lif->I_syn);
 }
 
-// ============================================================================
-// state_vars()
-// ============================================================================
+void lif_reset(void* self) {
+    auto* lif = static_cast<LIFNeuron*>(self);
+    lif->v.fill_(lif->options.v_rest());
+    lif->spike.zero_();
+    lif->refractory.zero_();
+    lif->I_syn.zero_();
+}
 
-std::vector<std::string> LIFImpl::state_vars() const {
-    return {"v", "spike", "refractory", "I_syn"};
+static const char* lif_var_names[] = {"v", "spike", "refractory", "I_syn"};
+
+const char** lif_state_vars(void* /*self*/, int* count) {
+    *count = 4;
+    return lif_var_names;
+}
+
+int64_t lif_size(void* self) {
+    return static_cast<LIFNeuron*>(self)->n;
+}
+
+void lif_to_device(void* self, torch::Device device) {
+    auto* lif = static_cast<LIFNeuron*>(self);
+    lif->v          = lif->v.to(device);
+    lif->spike      = lif->spike.to(device);
+    lif->refractory = lif->refractory.to(device);
+    lif->I_syn      = lif->I_syn.to(device);
+    lif->v_rest     = lif->v_rest.to(device);
+    lif->v_thresh   = lif->v_thresh.to(device);
+    lif->v_reset    = lif->v_reset.to(device);
+    lif->tau_m      = lif->tau_m.to(device);
+    lif->tau_ref    = lif->tau_ref.to(device);
+    lif->c_m        = lif->c_m.to(device);
+    lif->i_bg       = lif->i_bg.to(device);
 }
 
 } // namespace neuron

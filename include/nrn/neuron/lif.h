@@ -1,8 +1,5 @@
 #pragma once
 
-#include <string>
-#include <vector>
-
 #include <torch/torch.h>
 
 #include <nrn/core/types.h>
@@ -23,58 +20,66 @@ namespace neuron {
 //   refractory — remaining refractory time (s), 0 when not refractory
 //   I_syn      — total synaptic input current (A)
 //
-// Dynamics (forward Euler, to be replaced by CUDA kernel):
+// Dynamics (forward Euler):
 //   if refractory > 0:
 //       refractory -= dt
 //   else:
-//       dv/dt = (-(v - v_rest) + I_syn * tau_m / c_m + i_bg * tau_m / c_m) / tau_m
+//       dv/dt = (-(v - v_rest) / tau_m + (I_syn + i_bg) / c_m)
 //   if v >= v_thresh:
 //       spike = 1, v = v_reset, refractory = tau_ref
 //
-// Parameters are stored as 1-D tensors of shape [N] to allow per-neuron
-// heterogeneity (even though they are initialized uniformly from options).
+// Parameters stored as 1-D tensors [N] for per-neuron heterogeneity.
 // ============================================================================
-class LIFImpl : public nrn::Module<LIFImpl> {
-public:
-    /// Construct N LIF neurons with default options.
-    explicit LIFImpl(int64_t n);
 
-    /// Construct N LIF neurons with the given options.
-    LIFImpl(int64_t n, LIFOptions options);
+struct LIFNeuron {
+    int64_t n;
+    LIFOptions options;
 
-    /// Initialize / reinitialize all state and parameter tensors.
-    void reset() override;
+    // State tensors [N]
+    torch::Tensor v;
+    torch::Tensor spike;
+    torch::Tensor refractory;
+    torch::Tensor I_syn;
 
-    /// Advance the neuron state by one timestep dt.
-    void forward(nrn::State& state, nrn::Time t, nrn::Duration dt) override;
-
-    /// Return the names of state variables managed by this module.
-    std::vector<std::string> state_vars() const override;
-
-    // ------------------------------------------------------------------
-    // State tensors (registered as buffers — not trainable parameters)
-    // ------------------------------------------------------------------
-    torch::Tensor v;          ///< Membrane potential [N]
-    torch::Tensor spike;      ///< Spike indicator    [N]
-    torch::Tensor refractory; ///< Refractory timer   [N]
-    torch::Tensor I_syn;      ///< Synaptic current   [N]
-
-    // ------------------------------------------------------------------
-    // Model parameter tensors (registered as buffers)
-    // ------------------------------------------------------------------
-    torch::Tensor v_rest;     ///< Resting potential   [N]
-    torch::Tensor v_thresh;   ///< Spike threshold     [N]
-    torch::Tensor v_reset;    ///< Reset potential      [N]
-    torch::Tensor tau_m;      ///< Membrane time const  [N]
-    torch::Tensor tau_ref;    ///< Refractory period    [N]
-    torch::Tensor c_m;        ///< Membrane capacitance [N]
-    torch::Tensor i_bg;       ///< Background current   [N]
-
-private:
-    LIFOptions options_;
+    // Parameter tensors [N]
+    torch::Tensor v_rest;
+    torch::Tensor v_thresh;
+    torch::Tensor v_reset;
+    torch::Tensor tau_m;
+    torch::Tensor tau_ref;
+    torch::Tensor c_m;
+    torch::Tensor i_bg;
 };
 
-TORCH_MODULE(LIF);
+// Lifecycle
+LIFNeuron* lif_create(int64_t n, LIFOptions opts = {});
+void lif_destroy(LIFNeuron* lif);
+
+// Operations (also callable directly)
+void lif_forward(void* self, State& state, double t, double dt);
+void lif_reset(void* self);
+const char** lif_state_vars(void* self, int* count);
+int64_t lif_size(void* self);
+void lif_to_device(void* self, torch::Device device);
+
+// Typed convenience wrappers
+inline void lif_forward(LIFNeuron* lif, State& state, double t, double dt) {
+    lif_forward(static_cast<void*>(lif), state, t, dt);
+}
+inline void lif_reset(LIFNeuron* lif) {
+    lif_reset(static_cast<void*>(lif));
+}
+inline void lif_to_device(LIFNeuron* lif, torch::Device device) {
+    lif_to_device(static_cast<void*>(lif), device);
+}
+
+// Ops table
+extern nrn_module_ops lif_ops;
+
+// Wrap as generic module handle
+inline NrnModule lif_as_module(LIFNeuron* lif) {
+    return NrnModule{static_cast<void*>(lif), &lif_ops};
+}
 
 } // namespace neuron
 } // namespace nrn

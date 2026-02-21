@@ -19,8 +19,9 @@ using namespace nrn::literals;
 
 TEST(RandomTopology, DefaultConstruction) {
     // Constructing a Random topology generator should not crash.
-    Random gen;
+    auto* gen = random_topology_create();
     SUCCEED();
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, WithOptions) {
@@ -28,8 +29,9 @@ TEST(RandomTopology, WithOptions) {
     opts.probability(0.05);
     opts.allow_autapses(true);
 
-    Random gen(opts);
+    auto* gen = random_topology_create(opts);
     SUCCEED();
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, OptionsBuilderChaining) {
@@ -52,9 +54,10 @@ TEST(RandomTopology, DefaultOptionsValues) {
 // ---------------------------------------------------------------------------
 
 TEST(RandomTopology, GenerateBasicShape) {
-    Random gen(RandomTopologyOptions().probability(0.1));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.1));
 
-    auto ct = gen.generate(
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen),
         /*n_source=*/64,
         /*n_target=*/64,
         /*block_size=*/32,
@@ -65,52 +68,67 @@ TEST(RandomTopology, GenerateBasicShape) {
     EXPECT_EQ(ct.n_target, 64);
     EXPECT_EQ(ct.block_size, 32);
     EXPECT_GT(ct.block_index.n_blocks(), 0);
+
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, GenerateWeightsTensorExists) {
-    Random gen(RandomTopologyOptions().probability(0.5));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.5));
 
-    auto ct = gen.generate(32, 32, 16, torch::kCPU);
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen), 32, 32, 16, torch::kCPU);
 
     EXPECT_TRUE(ct.weights.defined());
     EXPECT_EQ(ct.weights.dim(), 3);
     EXPECT_EQ(ct.weights.size(1), 16);
     EXPECT_EQ(ct.weights.size(2), 16);
+
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, GenerateStructuralMaskExists) {
-    Random gen(RandomTopologyOptions().probability(0.5));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.5));
 
-    auto ct = gen.generate(32, 32, 16, torch::kCPU);
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen), 32, 32, 16, torch::kCPU);
 
     EXPECT_TRUE(ct.structural_mask.defined());
     EXPECT_EQ(ct.structural_mask.dim(), 3);
     EXPECT_EQ(ct.structural_mask.size(0), ct.block_index.n_blocks());
+
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, GenerateModulatoryMaskIsOnes) {
-    Random gen(RandomTopologyOptions().probability(0.5));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.5));
 
-    auto ct = gen.generate(16, 16, 8, torch::kCPU);
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen), 16, 16, 8, torch::kCPU);
 
     // Modulatory mask should be initialized to ones (no modulation).
     EXPECT_TRUE(ct.modulatory_mask.defined());
     EXPECT_TRUE(torch::all(ct.modulatory_mask == 1.0).item<bool>());
+
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, GenerateDelayTensorExists) {
-    Random gen(RandomTopologyOptions().probability(0.5));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.5));
 
-    auto ct = gen.generate(16, 16, 8, torch::kCPU);
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen), 16, 16, 8, torch::kCPU);
 
     EXPECT_TRUE(ct.delays.defined());
     EXPECT_EQ(ct.delays.dim(), 3);
+
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, GenerateBlockIndexConsistency) {
-    Random gen(RandomTopologyOptions().probability(0.3));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.3));
 
-    auto ct = gen.generate(64, 64, 16, torch::kCPU);
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen), 64, 64, 16, torch::kCPU);
 
     int64_t n_blocks = ct.block_index.n_blocks();
     int64_t n_target_blocks = (64 + 16 - 1) / 16;  // = 4
@@ -127,13 +145,16 @@ TEST(RandomTopology, GenerateBlockIndexConsistency) {
         EXPECT_GE(ct.block_index.row_ptr[i].item<int32_t>(),
                   ct.block_index.row_ptr[i-1].item<int32_t>());
     }
+
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, GenerateDifferentSizes) {
     // Source and target can have different sizes.
-    Random gen(RandomTopologyOptions().probability(0.2));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.2));
 
-    auto ct = gen.generate(
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen),
         /*n_source=*/128,
         /*n_target=*/64,
         /*block_size=*/32,
@@ -142,13 +163,16 @@ TEST(RandomTopology, GenerateDifferentSizes) {
     EXPECT_EQ(ct.n_source, 128);
     EXPECT_EQ(ct.n_target, 64);
     EXPECT_EQ(ct.block_size, 32);
+
+    random_topology_destroy(gen);
 }
 
 TEST(RandomTopology, GenerateSmallPopulation) {
     // Population smaller than block size.
-    Random gen(RandomTopologyOptions().probability(0.5));
+    auto* gen = random_topology_create(RandomTopologyOptions().probability(0.5));
 
-    auto ct = gen.generate(
+    auto ct = random_topology_generate(
+        static_cast<void*>(gen),
         /*n_source=*/8,
         /*n_target=*/8,
         /*block_size=*/16,
@@ -157,6 +181,8 @@ TEST(RandomTopology, GenerateSmallPopulation) {
     EXPECT_EQ(ct.n_source, 8);
     EXPECT_EQ(ct.n_target, 8);
     EXPECT_EQ(ct.block_size, 16);
+
+    random_topology_destroy(gen);
 }
 
 // ===========================================================================
@@ -168,8 +194,9 @@ TEST(RandomTopology, GenerateSmallPopulation) {
 // ---------------------------------------------------------------------------
 
 TEST(DistanceDependent, DefaultConstruction) {
-    DistanceDependent gen;
+    auto* gen = distance_dep_topology_create();
     SUCCEED();
+    distance_dep_topology_destroy(gen);
 }
 
 TEST(DistanceDependent, WithOptions) {
@@ -178,8 +205,9 @@ TEST(DistanceDependent, WithOptions) {
         .max_distance(1000.0_um)
         .min_probability(0.01);
 
-    DistanceDependent gen(opts);
+    auto* gen = distance_dep_topology_create(opts);
     SUCCEED();
+    distance_dep_topology_destroy(gen);
 }
 
 TEST(DistanceDependent, DefaultOptionsValues) {
@@ -209,9 +237,10 @@ TEST(DistanceDependent, GenerateBasicShape) {
         .sigma(200.0_um)
         .max_distance(1000.0_um);
 
-    DistanceDependent gen(opts);
+    auto* gen = distance_dep_topology_create(opts);
 
-    auto ct = gen.generate(
+    auto ct = distance_dep_topology_generate(
+        static_cast<void*>(gen),
         /*n_source=*/64,
         /*n_target=*/64,
         /*block_size=*/32,
@@ -220,23 +249,30 @@ TEST(DistanceDependent, GenerateBasicShape) {
     EXPECT_EQ(ct.n_source, 64);
     EXPECT_EQ(ct.n_target, 64);
     EXPECT_EQ(ct.block_size, 32);
+
+    distance_dep_topology_destroy(gen);
 }
 
 TEST(DistanceDependent, GenerateHasWeights) {
-    DistanceDependent gen(DistanceDependentOptions().sigma(100.0_um));
+    auto* gen = distance_dep_topology_create(
+        DistanceDependentOptions().sigma(100.0_um));
 
-    auto ct = gen.generate(32, 32, 16, torch::kCPU);
+    auto ct = distance_dep_topology_generate(
+        static_cast<void*>(gen), 32, 32, 16, torch::kCPU);
 
     EXPECT_TRUE(ct.weights.defined());
     EXPECT_TRUE(ct.structural_mask.defined());
     EXPECT_TRUE(ct.modulatory_mask.defined());
     EXPECT_TRUE(ct.delays.defined());
+
+    distance_dep_topology_destroy(gen);
 }
 
 TEST(DistanceDependent, GenerateDifferentSizes) {
-    DistanceDependent gen;
+    auto* gen = distance_dep_topology_create();
 
-    auto ct = gen.generate(
+    auto ct = distance_dep_topology_generate(
+        static_cast<void*>(gen),
         /*n_source=*/128,
         /*n_target=*/64,
         /*block_size=*/32,
@@ -244,6 +280,8 @@ TEST(DistanceDependent, GenerateDifferentSizes) {
 
     EXPECT_EQ(ct.n_source, 128);
     EXPECT_EQ(ct.n_target, 64);
+
+    distance_dep_topology_destroy(gen);
 }
 
 TEST(DistanceDependent, GenerateNarrowSigma) {
@@ -252,14 +290,17 @@ TEST(DistanceDependent, GenerateNarrowSigma) {
         .sigma(10.0_um)
         .max_distance(50.0_um);
 
-    DistanceDependent gen_narrow(opts_narrow);
+    auto* gen_narrow = distance_dep_topology_create(opts_narrow);
 
-    auto ct_narrow = gen_narrow.generate(64, 64, 16, torch::kCPU);
+    auto ct_narrow = distance_dep_topology_generate(
+        static_cast<void*>(gen_narrow), 64, 64, 16, torch::kCPU);
 
     // With very narrow sigma, we expect connectivity to be quite sparse.
     // Just verify it produced a valid structure.
     EXPECT_GE(ct_narrow.block_index.n_blocks(), 0);
     EXPECT_EQ(ct_narrow.block_size, 16);
+
+    distance_dep_topology_destroy(gen_narrow);
 }
 
 TEST(DistanceDependent, GenerateWideSigma) {
@@ -268,26 +309,31 @@ TEST(DistanceDependent, GenerateWideSigma) {
         .sigma(10000.0_um)
         .max_distance(100000.0_um);
 
-    DistanceDependent gen_wide(opts_wide);
+    auto* gen_wide = distance_dep_topology_create(opts_wide);
 
-    auto ct_wide = gen_wide.generate(32, 32, 16, torch::kCPU);
+    auto ct_wide = distance_dep_topology_generate(
+        static_cast<void*>(gen_wide), 32, 32, 16, torch::kCPU);
 
     EXPECT_GT(ct_wide.block_index.n_blocks(), 0);
+
+    distance_dep_topology_destroy(gen_wide);
 }
 
 // ===========================================================================
-// TopologyGenerator polymorphism
+// TopologyGenerator polymorphism (ops-table dispatch)
 // ===========================================================================
 
 TEST(Topology, PolymorphicUsage) {
-    // Both generators should be usable through the TopologyGenerator interface.
-    std::unique_ptr<TopologyGenerator> gen;
-
-    gen = std::make_unique<Random>(RandomTopologyOptions().probability(0.1));
-    auto ct1 = gen->generate(32, 32, 16, torch::kCPU);
+    // Both generators should be usable through the TopologyGenerator handle.
+    auto* r = random_topology_create(RandomTopologyOptions().probability(0.1));
+    auto gen1 = random_topology_as_generator(r);
+    auto ct1 = topology_generate(&gen1, 32, 32, 16, torch::kCPU);
     EXPECT_EQ(ct1.n_source, 32);
+    random_topology_destroy(r);
 
-    gen = std::make_unique<DistanceDependent>(DistanceDependentOptions().sigma(200.0_um));
-    auto ct2 = gen->generate(32, 32, 16, torch::kCPU);
+    auto* d = distance_dep_topology_create(DistanceDependentOptions().sigma(200.0_um));
+    auto gen2 = distance_dep_topology_as_generator(d);
+    auto ct2 = topology_generate(&gen2, 32, 32, 16, torch::kCPU);
     EXPECT_EQ(ct2.n_source, 32);
+    distance_dep_topology_destroy(d);
 }

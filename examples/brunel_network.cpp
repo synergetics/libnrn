@@ -61,55 +61,49 @@ int main() {
         .tau_ref(2.0_ms)
         .c_m(250.0_pF);
 
-    auto exc_module = neuron::LIF(10000, exc_opts);
-    auto inh_module = neuron::LIF(2500, inh_opts);
+    auto* exc_lif = neuron::lif_create(10000, exc_opts);
+    auto* inh_lif = neuron::lif_create(2500, inh_opts);
 
-    auto exc = std::make_shared<Population>(
-        "excitatory",
-        exc_module.ptr(),
-        10000,
-        device);
+    auto exc = std::shared_ptr<Population>(
+        population_create("excitatory", neuron::lif_as_module(exc_lif), 10000, device),
+        population_destroy);
 
-    auto inh = std::make_shared<Population>(
-        "inhibitory",
-        inh_module.ptr(),
-        2500,
-        device);
+    auto inh = std::shared_ptr<Population>(
+        population_create("inhibitory", neuron::lif_as_module(inh_lif), 2500, device),
+        population_destroy);
 
     std::cout << "Created populations: "
-              << exc->name() << " (" << exc->size() << "), "
-              << inh->name() << " (" << inh->size() << ")\n";
+              << exc->name << " (" << exc->n << "), "
+              << inh->name << " (" << inh->n << ")\n";
 
     // -----------------------------------------------------------------------
     // 2. Create connectivity
     // -----------------------------------------------------------------------
 
-    auto random_topo = Random(RandomTopologyOptions()
+    auto* topo = random_topology_create(RandomTopologyOptions()
         .probability(0.1)
         .allow_autapses(false));
+    auto gen = random_topology_as_generator(topo);
 
     auto conn_opts = ConnectOptions()
         .block_size(256)
         .representation(BlockDense)
         .default_delay(0.001);
 
-    auto syn_static = StaticSynapse(1);  // Placeholder synapse module.
+    auto* syn = synapse::static_synapse_create(1);
+    auto syn_mod = synapse::static_synapse_as_module(syn);
 
     // E -> E
-    auto ee_conn = connect(exc, exc, random_topo,
-                           syn_static.ptr(), conn_opts);
+    auto ee_conn = connect(exc, exc, &gen, syn_mod, conn_opts);
 
     // E -> I
-    auto ei_conn = connect(exc, inh, random_topo,
-                           syn_static.ptr(), conn_opts);
+    auto ei_conn = connect(exc, inh, &gen, syn_mod, conn_opts);
 
     // I -> E
-    auto ie_conn = connect(inh, exc, random_topo,
-                           syn_static.ptr(), conn_opts);
+    auto ie_conn = connect(inh, exc, &gen, syn_mod, conn_opts);
 
     // I -> I
-    auto ii_conn = connect(inh, inh, random_topo,
-                           syn_static.ptr(), conn_opts);
+    auto ii_conn = connect(inh, inh, &gen, syn_mod, conn_opts);
 
     std::cout << "Created 4 connection pathways (E->E, E->I, I->E, I->I)\n";
 
@@ -117,14 +111,14 @@ int main() {
     // 3. Attach STDP to excitatory connections
     // -----------------------------------------------------------------------
 
-    auto stdp_rule = std::make_shared<STDP>(STDPOptions()
+    auto* stdp = stdp_create(STDPOptions()
         .tau_plus(20.0_ms)
         .tau_minus(20.0_ms)
         .a_plus(0.01)
         .a_minus(-0.012)
         .learning_rate(1.0));
 
-    ee_conn->attach(stdp_rule);
+    connection_attach(ee_conn.get(), stdp_as_rule(stdp));
 
     std::cout << "Attached STDP to E->E connections\n";
 
@@ -132,11 +126,15 @@ int main() {
     // 4. Compose into a Region
     // -----------------------------------------------------------------------
 
-    Region region("brunel_network");
-    region->add(exc, inh);
-    region->add(ee_conn, ei_conn, ie_conn, ii_conn);
+    auto* region = region_create("brunel_network");
+    region_add_population(region, exc);
+    region_add_population(region, inh);
+    region_add_connection(region, ee_conn);
+    region_add_connection(region, ei_conn);
+    region_add_connection(region, ie_conn);
+    region_add_connection(region, ii_conn);
 
-    std::cout << "Region total neurons: " << region->total_size() << "\n";
+    std::cout << "Region total neurons: " << region_total_size(region) << "\n";
 
     // -----------------------------------------------------------------------
     // 5. Configure and run simulation
@@ -149,22 +147,22 @@ int main() {
         .duration(1.0_s)
         .device(device);
 
-    Simulation sim(region, sim_opts);
+    auto* sim = sim_create(region, sim_opts);
 
     // Record spikes from both populations.
-    sim.record(exc, {"v", "spike"}, /*subsample=*/10);
-    sim.record(inh, {"v", "spike"}, /*subsample=*/10);
+    sim_record(sim, exc, {"v", "spike"}, /*subsample=*/10);
+    sim_record(sim, inh, {"v", "spike"}, /*subsample=*/10);
 
     std::cout << "Running simulation for 1.0 s at dt = 0.1 ms...\n";
-    sim.run();
+    sim_run(sim);
     std::cout << "Simulation complete.\n";
 
     // -----------------------------------------------------------------------
     // 6. Retrieve and display results
     // -----------------------------------------------------------------------
 
-    auto exc_spikes = sim.get_spikes(exc);
-    auto inh_spikes = sim.get_spikes(inh);
+    auto exc_spikes = sim_get_spikes(sim, exc);
+    auto inh_spikes = sim_get_spikes(sim, inh);
 
     int64_t n_exc_spikes = exc_spikes.size(0);
     int64_t n_inh_spikes = inh_spikes.size(0);
@@ -179,9 +177,19 @@ int main() {
     std::cout << "Inhibitory spikes: " << n_inh_spikes
               << " (mean rate: " << inh_rate << " Hz)\n";
 
-    // Save to file.
-    sim.save("brunel_output.h5");
-    std::cout << "Saved results to brunel_output.h5\n";
+    // -----------------------------------------------------------------------
+    // 7. Cleanup
+    // -----------------------------------------------------------------------
+
+    sim_destroy(sim);
+    region_destroy(region);
+    ee_conn.reset(); ei_conn.reset(); ie_conn.reset(); ii_conn.reset();
+    exc.reset(); inh.reset();
+    stdp_destroy(stdp);
+    synapse::static_synapse_destroy(syn);
+    random_topology_destroy(topo);
+    neuron::lif_destroy(exc_lif);
+    neuron::lif_destroy(inh_lif);
 
     return 0;
 }

@@ -1,83 +1,45 @@
 #include <nrn/network/region.h>
 
-#include <stdexcept>
-
 namespace nrn {
 
-RegionImpl::RegionImpl(std::string region_name)
-    : region_name_(std::move(region_name)) {
-    // n_ (inherited from Module) starts at 0; updated as populations are added.
+Region* region_create(const std::string& name) {
+    auto* r = new Region();
+    r->name = name;
+    return r;
 }
 
-// ------------------------------------------------------------------
-// Population / connection management
-// ------------------------------------------------------------------
-
-void RegionImpl::add(std::shared_ptr<Population> population) {
-    TORCH_CHECK(population != nullptr,
-                "Cannot add a null population to region '", region_name_, "'");
-    n_ += population->size(); // keep Module::size() in sync
-    populations_.push_back(std::move(population));
+void region_destroy(Region* r) {
+    delete r;
 }
 
-void RegionImpl::add(std::shared_ptr<Connection> connection) {
-    TORCH_CHECK(connection != nullptr,
-                "Cannot add a null connection to region '", region_name_, "'");
-    connections_.push_back(std::move(connection));
+void region_add_population(Region* r, std::shared_ptr<Population> pop) {
+    TORCH_CHECK(pop != nullptr,
+                "Cannot add a null population to region '", r->name, "'");
+    r->populations.push_back(std::move(pop));
 }
 
-// ------------------------------------------------------------------
-// Queries
-// ------------------------------------------------------------------
+void region_add_connection(Region* r, std::shared_ptr<Connection> conn) {
+    TORCH_CHECK(conn != nullptr,
+                "Cannot add a null connection to region '", r->name, "'");
+    r->connections.push_back(std::move(conn));
+}
 
-std::shared_ptr<Population> RegionImpl::population(
-    const std::string& name) const {
-    for (const auto& pop : populations_) {
-        if (pop->name() == name) {
+std::shared_ptr<Population> region_find_population(const Region* r,
+                                                   const std::string& name) {
+    for (const auto& pop : r->populations) {
+        if (pop->name == name) {
             return pop;
         }
     }
-    TORCH_CHECK(false, "Region '", region_name_,
-                "' does not contain population '", name, "'");
-    return nullptr; // unreachable
+    return nullptr;
 }
 
-int64_t RegionImpl::total_size() const {
+int64_t region_total_size(const Region* r) {
     int64_t total = 0;
-    for (const auto& pop : populations_) {
-        total += pop->size();
+    for (const auto& pop : r->populations) {
+        total += pop->n;
     }
     return total;
-}
-
-// ------------------------------------------------------------------
-// Module interface
-// ------------------------------------------------------------------
-
-void RegionImpl::forward(State& /*state*/, Time /*t*/, Duration /*dt*/) {
-    TORCH_CHECK(false,
-                "Region::forward() not yet implemented — use Simulation to "
-                "orchestrate the time-stepping loop");
-}
-
-void RegionImpl::reset() {
-    // Reset every population's state.
-    for (auto& pop : populations_) {
-        // Populations are not Modules themselves, so we clear their state.
-        pop->state() = State();
-    }
-    // Connections will be reset when they gain a Module interface.
-}
-
-std::vector<std::string> RegionImpl::state_vars() const {
-    // Aggregate from all populations (prefixed by population name).
-    std::vector<std::string> vars;
-    for (const auto& pop : populations_) {
-        for (const auto& key : pop->state().keys()) {
-            vars.push_back(pop->name() + "/" + key);
-        }
-    }
-    return vars;
 }
 
 } // namespace nrn

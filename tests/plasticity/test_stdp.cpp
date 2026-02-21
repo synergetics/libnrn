@@ -49,8 +49,9 @@ static ConnectivityTensor make_test_ct(int64_t n_blocks, int64_t block_size) {
 
 TEST(STDP, DefaultConstruction) {
     // Constructing an STDP rule with default options should not crash.
-    nrn::STDP stdp;
+    auto* stdp = stdp_create();
     SUCCEED();
+    stdp_destroy(stdp);
 }
 
 TEST(STDP, ConstructionWithOptions) {
@@ -63,15 +64,17 @@ TEST(STDP, ConstructionWithOptions) {
         .w_min(0.0)
         .learning_rate(0.5);
 
-    nrn::STDP stdp(opts);
+    auto* stdp = stdp_create(opts);
 
-    EXPECT_DOUBLE_EQ(stdp.options().tau_plus(), 0.020);
-    EXPECT_DOUBLE_EQ(stdp.options().tau_minus(), 0.020);
-    EXPECT_DOUBLE_EQ(stdp.options().a_plus(), 0.01);
-    EXPECT_DOUBLE_EQ(stdp.options().a_minus(), -0.012);
-    EXPECT_DOUBLE_EQ(stdp.options().w_max(), 1.0);
-    EXPECT_DOUBLE_EQ(stdp.options().w_min(), 0.0);
-    EXPECT_DOUBLE_EQ(stdp.options().learning_rate(), 0.5);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).tau_plus(), 0.020);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).tau_minus(), 0.020);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).a_plus(), 0.01);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).a_minus(), -0.012);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).w_max(), 1.0);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).w_min(), 0.0);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).learning_rate(), 0.5);
+
+    stdp_destroy(stdp);
 }
 
 // ---------------------------------------------------------------------------
@@ -118,9 +121,10 @@ TEST(STDP, OptionsBuilderChaining) {
 // ---------------------------------------------------------------------------
 
 TEST(STDP, ResetDoesNotCrash) {
-    nrn::STDP stdp;
-    stdp.reset();
+    auto* stdp = stdp_create();
+    stdp_reset(stdp);
     SUCCEED();
+    stdp_destroy(stdp);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,46 +132,54 @@ TEST(STDP, ResetDoesNotCrash) {
 // ---------------------------------------------------------------------------
 
 TEST(STDP, InitializeAllocatesTraces) {
-    nrn::STDP stdp;
+    auto* stdp = stdp_create();
     auto ct = make_test_ct(2, 4);
 
     // Before initialize, traces should not exist.
     EXPECT_FALSE(ct.trace_pre.has_value());
     EXPECT_FALSE(ct.trace_post.has_value());
 
-    stdp.initialize(ct);
+    stdp_initialize(stdp, ct);
 
     // After initialize, traces should exist with correct shape.
     EXPECT_TRUE(ct.trace_pre.has_value());
     EXPECT_TRUE(ct.trace_post.has_value());
     EXPECT_EQ(ct.trace_pre->sizes(), ct.weights.sizes());
     EXPECT_EQ(ct.trace_post->sizes(), ct.weights.sizes());
+
+    stdp_destroy(stdp);
 }
 
 TEST(STDP, InitializeTracesAreZero) {
-    nrn::STDP stdp;
+    auto* stdp = stdp_create();
     auto ct = make_test_ct(2, 4);
 
-    stdp.initialize(ct);
+    stdp_initialize(stdp, ct);
 
     EXPECT_TRUE(torch::all(*ct.trace_pre == 0).item<bool>());
     EXPECT_TRUE(torch::all(*ct.trace_post == 0).item<bool>());
+
+    stdp_destroy(stdp);
 }
 
 // ---------------------------------------------------------------------------
-// Polymorphic usage through PlasticityRule base
+// Polymorphic usage through PlasticityRule ops table
 // ---------------------------------------------------------------------------
 
 TEST(STDP, PolymorphicUsage) {
-    std::unique_ptr<PlasticityRule> rule = std::make_unique<STDP>(
+    auto* stdp = stdp_create(
         STDPOptions().tau_plus(20.0_ms).a_plus(0.01));
 
+    auto rule = stdp_as_rule(stdp);
+
     auto ct = make_test_ct(1, 4);
-    rule->initialize(ct);
-    rule->reset();
+    plasticity_initialize(&rule, ct);
+    plasticity_reset(&rule);
 
     EXPECT_TRUE(ct.trace_pre.has_value());
     SUCCEED();
+
+    stdp_destroy(stdp);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,10 +188,12 @@ TEST(STDP, PolymorphicUsage) {
 
 TEST(STDP, WeightBoundsInOptions) {
     auto opts = STDPOptions().w_min(0.0).w_max(5.0);
-    nrn::STDP stdp(opts);
+    auto* stdp = stdp_create(opts);
 
-    EXPECT_DOUBLE_EQ(stdp.options().w_min(), 0.0);
-    EXPECT_DOUBLE_EQ(stdp.options().w_max(), 5.0);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).w_min(), 0.0);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).w_max(), 5.0);
+
+    stdp_destroy(stdp);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,11 +205,13 @@ TEST(STDP, AsymmetricTimeConstants) {
         .tau_plus(10.0_ms)
         .tau_minus(30.0_ms);
 
-    nrn::STDP stdp(opts);
+    auto* stdp = stdp_create(opts);
 
-    EXPECT_DOUBLE_EQ(stdp.options().tau_plus(), 10.0e-3);
-    EXPECT_DOUBLE_EQ(stdp.options().tau_minus(), 30.0e-3);
-    EXPECT_NE(stdp.options().tau_plus(), stdp.options().tau_minus());
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).tau_plus(), 10.0e-3);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).tau_minus(), 30.0e-3);
+    EXPECT_NE(stdp_options(stdp).tau_plus(), stdp_options(stdp).tau_minus());
+
+    stdp_destroy(stdp);
 }
 
 // ---------------------------------------------------------------------------
@@ -204,14 +220,18 @@ TEST(STDP, AsymmetricTimeConstants) {
 
 TEST(STDP, ZeroLearningRate) {
     auto opts = STDPOptions().learning_rate(0.0);
-    nrn::STDP stdp(opts);
+    auto* stdp = stdp_create(opts);
 
-    EXPECT_DOUBLE_EQ(stdp.options().learning_rate(), 0.0);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).learning_rate(), 0.0);
+
+    stdp_destroy(stdp);
 }
 
 TEST(STDP, HighLearningRate) {
     auto opts = STDPOptions().learning_rate(10.0);
-    nrn::STDP stdp(opts);
+    auto* stdp = stdp_create(opts);
 
-    EXPECT_DOUBLE_EQ(stdp.options().learning_rate(), 10.0);
+    EXPECT_DOUBLE_EQ(stdp_options(stdp).learning_rate(), 10.0);
+
+    stdp_destroy(stdp);
 }

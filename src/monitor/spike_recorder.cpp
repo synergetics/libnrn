@@ -5,25 +5,45 @@
 
 namespace nrn {
 
-SpikeRecorder::SpikeRecorder(std::string pop_name, int64_t subsample)
-    : pop_name_(std::move(pop_name)),
-      subsample_(subsample) {
-    TORCH_CHECK(subsample_ >= 1,
-                "SpikeRecorder: subsample must be >= 1, got ", subsample_);
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+SpikeRecorderState* spike_recorder_create(std::string pop_name,
+                                          int64_t subsample) {
+    TORCH_CHECK(subsample >= 1,
+                "spike_recorder_create: subsample must be >= 1, got ",
+                subsample);
+
+    auto* s = new SpikeRecorderState{};
+    s->pop_name = std::move(pop_name);
+    s->subsample = subsample;
+    s->call_count = 0;
+    return s;
 }
 
-void SpikeRecorder::record(const State& state, Time t) {
-    ++call_count_;
-    if ((call_count_ % subsample_) != 0) {
+void spike_recorder_destroy(SpikeRecorderState* s) {
+    delete s;
+}
+
+// ---------------------------------------------------------------------------
+// Ops implementations (void* self -> SpikeRecorderState*)
+// ---------------------------------------------------------------------------
+
+void spike_recorder_record(void* self, const State& state, double t) {
+    auto* s = static_cast<SpikeRecorderState*>(self);
+
+    ++s->call_count;
+    if ((s->call_count % s->subsample) != 0) {
         return;
     }
 
-    if (!state.contains("spike")) {
+    if (!state_contains(state, "spike")) {
         return;
     }
 
     // Spike tensor: 1-D float [N], nonzero entries are spikes.
-    auto spikes = state.get("spike").to(torch::kCPU).to(torch::kFloat32);
+    auto spikes = state_get(state, "spike").to(torch::kCPU).to(torch::kFloat32);
     auto nonzero = spikes.nonzero().squeeze(1); // [K] indices
 
     if (nonzero.numel() == 0) {
@@ -32,19 +52,29 @@ void SpikeRecorder::record(const State& state, Time t) {
 
     auto ids_accessor = nonzero.accessor<int64_t, 1>();
     for (int64_t i = 0; i < ids_accessor.size(0); ++i) {
-        neuron_ids_.push_back(static_cast<float>(ids_accessor[i]));
-        times_.push_back(static_cast<float>(t));
+        s->neuron_ids.push_back(static_cast<float>(ids_accessor[i]));
+        s->times.push_back(static_cast<float>(t));
     }
 }
 
-void SpikeRecorder::reset() {
-    neuron_ids_.clear();
-    times_.clear();
-    call_count_ = 0;
+void spike_recorder_reset(void* self) {
+    auto* s = static_cast<SpikeRecorderState*>(self);
+    s->neuron_ids.clear();
+    s->times.clear();
+    s->call_count = 0;
 }
 
-torch::Tensor SpikeRecorder::get_spikes() const {
-    int64_t k = static_cast<int64_t>(neuron_ids_.size());
+const char* spike_recorder_population_name(void* self) {
+    auto* s = static_cast<SpikeRecorderState*>(self);
+    return s->pop_name.c_str();
+}
+
+// ---------------------------------------------------------------------------
+// Query functions
+// ---------------------------------------------------------------------------
+
+torch::Tensor spike_recorder_get_spikes(const SpikeRecorderState* s) {
+    int64_t k = static_cast<int64_t>(s->neuron_ids.size());
     if (k == 0) {
         return torch::zeros({0, 2}, torch::kFloat32);
     }
@@ -52,18 +82,19 @@ torch::Tensor SpikeRecorder::get_spikes() const {
     auto result = torch::empty({k, 2}, torch::kFloat32);
     auto acc = result.accessor<float, 2>();
     for (int64_t i = 0; i < k; ++i) {
-        acc[i][0] = neuron_ids_[static_cast<size_t>(i)];
-        acc[i][1] = times_[static_cast<size_t>(i)];
+        acc[i][0] = s->neuron_ids[static_cast<size_t>(i)];
+        acc[i][1] = s->times[static_cast<size_t>(i)];
     }
     return result;
 }
 
-torch::Tensor SpikeRecorder::get_spike_times(int64_t neuron_id) const {
+torch::Tensor spike_recorder_get_spike_times(const SpikeRecorderState* s,
+                                             int64_t neuron_id) {
     std::vector<float> matched;
     float target = static_cast<float>(neuron_id);
-    for (size_t i = 0; i < neuron_ids_.size(); ++i) {
-        if (neuron_ids_[i] == target) {
-            matched.push_back(times_[i]);
+    for (size_t i = 0; i < s->neuron_ids.size(); ++i) {
+        if (s->neuron_ids[i] == target) {
+            matched.push_back(s->times[i]);
         }
     }
     if (matched.empty()) {
@@ -75,8 +106,18 @@ torch::Tensor SpikeRecorder::get_spike_times(int64_t neuron_id) const {
         .clone();
 }
 
-int64_t SpikeRecorder::spike_count() const {
-    return static_cast<int64_t>(neuron_ids_.size());
+int64_t spike_recorder_spike_count(const SpikeRecorderState* s) {
+    return static_cast<int64_t>(s->neuron_ids.size());
 }
+
+// ---------------------------------------------------------------------------
+// Ops table
+// ---------------------------------------------------------------------------
+
+recorder_ops spike_recorder_ops = {
+    spike_recorder_record,
+    spike_recorder_reset,
+    spike_recorder_population_name,
+};
 
 } // namespace nrn
