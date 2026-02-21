@@ -51,10 +51,41 @@ __global__ void izhikevich_forward_kernel(
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    // TODO: implement Izhikevich dynamics
-    // This kernel is a scaffold — the integration logic will be filled in
-    // during Phase 1 development. The structure (grid, block, data pointers)
-    // is established here so the build system and dispatch path work end-to-end.
+    // Convert dt from SI seconds to model milliseconds.
+    scalar_t dt_ms = dt * static_cast<scalar_t>(1000.0);
+
+    scalar_t v_i = v[i];
+    scalar_t u_i = u[i];
+    scalar_t I_i = I_syn[i];
+    scalar_t spike_i = static_cast<scalar_t>(0);
+
+    // Two half-steps for v (Izhikevich's recommended numerical scheme).
+    scalar_t dv1 = static_cast<scalar_t>(0.04) * v_i * v_i
+                 + static_cast<scalar_t>(5.0) * v_i
+                 + static_cast<scalar_t>(140.0) - u_i + I_i;
+    v_i += static_cast<scalar_t>(0.5) * dt_ms * dv1;
+
+    scalar_t dv2 = static_cast<scalar_t>(0.04) * v_i * v_i
+                 + static_cast<scalar_t>(5.0) * v_i
+                 + static_cast<scalar_t>(140.0) - u_i + I_i;
+    v_i += static_cast<scalar_t>(0.5) * dt_ms * dv2;
+
+    // Recovery variable.
+    scalar_t du = dt_ms * a[i] * (b[i] * v_i - u_i);
+    u_i += du;
+
+    // Spike detection.
+    if (v_i >= v_peak[i]) {
+        spike_i = static_cast<scalar_t>(1);
+        v_i = c[i];
+        u_i += d[i];
+    }
+
+    // Write back.
+    v[i] = v_i;
+    u[i] = u_i;
+    spike[i] = spike_i;
+    I_syn[i] = static_cast<scalar_t>(0);  // consumed
 }
 
 // ============================================================================
@@ -80,7 +111,7 @@ void izhikevich_forward_cuda(
     const int threads = 256;
     const int blocks = (static_cast<int>(N) + threads - 1) / threads;
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(v.scalar_type(), "izhikevich_forward_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(v.scalar_type(), "izhikevich_forward_cuda", [&] {
         izhikevich_forward_kernel<scalar_t><<<blocks, threads>>>(
             v.data_ptr<scalar_t>(),
             u.data_ptr<scalar_t>(),

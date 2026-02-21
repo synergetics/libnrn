@@ -82,20 +82,45 @@ void AdExImpl::reset() {
 // forward()
 // ============================================================================
 
-void AdExImpl::forward(nrn::State& state, nrn::Time t, nrn::Duration dt) {
-    // TODO: dispatch to CUDA kernel when tensors are on GPU.
-    //
-    // The AdEx dynamics are:
-    //   c_m * dv/dt = -g_l*(v - v_rest)
-    //                 + g_l*delta_t*exp((v - v_thresh)/delta_t)
-    //                 - w + I_syn + i_bg
-    //   tau_w * dw/dt = a*(v - v_rest) - w
-    //
-    //   if v >= v_peak:
-    //       spike = 1, v = v_reset, w += b, refractory = tau_ref
-    //
-    // Will be implemented by cuda::adex_forward_cuda().
-    //
+void AdExImpl::forward(nrn::State& state, nrn::Time /*t*/, nrn::Duration dt) {
+    if (v.is_cuda()) {
+        cuda::adex_forward_cuda(v, w, spike, refractory, I_syn,
+                                v_rest, v_thresh, v_reset, v_peak,
+                                tau_m, tau_w, tau_ref, c_m, g_l,
+                                a, b, delta_t, i_bg, dt);
+    } else {
+        // CPU path: vectorized PyTorch tensor operations.
+        auto active = (refractory <= 0);
+
+        // Decrement refractory timers.
+        refractory = torch::where(refractory > 0,
+                                  refractory - dt,
+                                  refractory);
+
+        // Exponential spike-initiation current.
+        auto I_exp = g_l * delta_t * torch::exp((v - v_thresh) / delta_t);
+
+        // Forward Euler: membrane potential (only non-refractory).
+        auto dv = dt * (-g_l * (v - v_rest) + I_exp - w + I_syn + i_bg) / c_m;
+        v = torch::where(active, v + dv, v);
+
+        // Adaptation dynamics — evolves even during refractory.
+        auto dw = dt * (a * (v - v_rest) - w) / tau_w;
+        w = w + dw;
+
+        // Spike detection (only non-refractory neurons can spike).
+        auto spiked = (v >= v_peak) & active;
+
+        // Apply reset.
+        v = torch::where(spiked, v_reset, v);
+        w = torch::where(spiked, w + b, w);
+        refractory = torch::where(spiked, tau_ref, refractory);
+        spike = spiked.to(v.dtype());
+
+        // Consume synaptic current.
+        I_syn.zero_();
+    }
+
     // Publish state into the State bag.
     state.set("v", v);
     state.set("w", w);

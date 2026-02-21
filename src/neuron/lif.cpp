@@ -67,24 +67,37 @@ void LIFImpl::reset() {
 // forward()
 // ============================================================================
 
-void LIFImpl::forward(nrn::State& state, nrn::Time t, nrn::Duration dt) {
-    // TODO: dispatch to CUDA kernel when tensors are on GPU.
-    //
-    // For now this is a placeholder. The actual integration will be performed
-    // by cuda::lif_forward_cuda() which launches the GPU kernel.
-    //
-    // CPU fallback (forward Euler) could be added here behind a device check:
-    //
-    //   if (v.is_cuda()) {
-    //       cuda::lif_forward_cuda(v, spike, refractory, I_syn,
-    //                              v_rest, v_thresh, v_reset,
-    //                              tau_m, tau_ref, c_m, i_bg, dt);
-    //   } else {
-    //       // CPU path ...
-    //   }
-    //
-    // Publish state tensors into the State bag so downstream modules
-    // (synapses, monitors, etc.) can read them.
+void LIFImpl::forward(nrn::State& state, nrn::Time /*t*/, nrn::Duration dt) {
+    if (v.is_cuda()) {
+        cuda::lif_forward_cuda(v, spike, refractory, I_syn,
+                               v_rest, v_thresh, v_reset,
+                               tau_m, tau_ref, c_m, i_bg, dt);
+    } else {
+        // CPU path: vectorized PyTorch tensor operations.
+        auto active = (refractory <= 0);
+
+        // Decrement refractory timers for neurons still in refractory.
+        refractory = torch::where(refractory > 0,
+                                  refractory - dt,
+                                  refractory);
+
+        // Forward Euler integration of membrane potential.
+        auto dv = dt * (-(v - v_rest) / tau_m + (I_syn + i_bg) / c_m);
+        v = torch::where(active, v + dv, v);
+
+        // Spike detection (only non-refractory neurons can spike).
+        auto spiked = (v >= v_thresh) & active;
+
+        // Apply reset.
+        v = torch::where(spiked, v_reset, v);
+        refractory = torch::where(spiked, tau_ref, refractory);
+        spike = spiked.to(v.dtype());
+
+        // Consume synaptic current.
+        I_syn.zero_();
+    }
+
+    // Publish state tensors into the State bag.
     state.set("v", v);
     state.set("spike", spike);
     state.set("refractory", refractory);

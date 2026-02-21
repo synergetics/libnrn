@@ -11,6 +11,7 @@ nrn_add_test(test_module                 core/test_module.cpp)
 nrn_add_test(test_lif                    neuron/test_lif.cpp)
 nrn_add_test(test_adex                   neuron/test_adex.cpp)
 nrn_add_test(test_izhikevich             neuron/test_izhikevich.cpp)
+nrn_add_test(test_neuron_dynamics        neuron/test_neuron_dynamics.cpp)
 
 nrn_add_test(test_connectivity_tensor    connectivity/test_connectivity_tensor.cpp)
 nrn_add_test(test_topology               connectivity/test_topology.cpp)

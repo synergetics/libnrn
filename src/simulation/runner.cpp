@@ -3,6 +3,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include <nrn/core/module.h>
+#include <nrn/connectivity/connect.h>
 #include <nrn/monitor/spike_recorder.h>
 #include <nrn/monitor/state_recorder.h>
 
@@ -21,7 +23,17 @@ Simulation::Simulation(Region region, SimulationOptions options)
                 pop->name(),
                 SpikeBuffer(pop->size(),
                             options_.max_delay_steps(),
-                            options_.device()));
+                            torch::kCPU));
+        }
+
+        // Initialize population states by calling forward(dt=0).
+        // This publishes initial tensors (v, spike, I_syn, etc.) into each
+        // population's State bag without changing any values.
+        for (auto& pop : region_->populations()) {
+            auto* mod = dynamic_cast<SteppableModule*>(pop->module().get());
+            if (mod) {
+                mod->forward(pop->state(), 0.0, 0.0);
+            }
         }
     }
 }
@@ -73,10 +85,89 @@ void Simulation::run_steps(int64_t n) {
 }
 
 void Simulation::step() {
-    TORCH_CHECK(false,
-                "Simulation::step() not yet implemented — the full "
-                "time-stepping pipeline (synaptic delivery, neuron update, "
-                "plasticity, slow subsystems) is planned for Phase 1");
+    auto t = clock_.time();
+    auto dt = options_.dt_fast();
+
+    // --- Phase 1: Zero I_syn for all populations ---
+    for (auto& pop : region_->populations()) {
+        auto& s = pop->state();
+        if (s.contains("I_syn")) {
+            s.get("I_syn").zero_();
+        }
+    }
+
+    // --- Phase 2: Deliver spikes through all connections ---
+    for (auto& conn : region_->connections()) {
+        auto source_name = conn->source()->name();
+
+        // Read source spikes from spike buffer (delay=1).
+        torch::Tensor source_spikes;
+        auto it = spike_buffers_.find(source_name);
+        if (it != spike_buffers_.end()) {
+            source_spikes = it->second.read(1);
+        } else {
+            // Fallback: get spikes from source state.
+            auto& src_state = conn->source()->state();
+            if (src_state.contains("spike")) {
+                source_spikes = src_state.get("spike");
+            } else {
+                continue;
+            }
+        }
+
+        conn->deliver(source_spikes, t, dt);
+    }
+
+    // --- Phase 3: Forward-integrate all neuron populations ---
+    for (auto& pop : region_->populations()) {
+        auto* mod = dynamic_cast<SteppableModule*>(pop->module().get());
+        TORCH_CHECK(mod != nullptr,
+                    "Population '", pop->name(),
+                    "' module does not implement SteppableModule");
+        mod->forward(pop->state(), t, dt);
+    }
+
+    // --- Phase 4: Push spikes into spike buffers ---
+    for (auto& pop : region_->populations()) {
+        auto& s = pop->state();
+        if (s.contains("spike")) {
+            auto it = spike_buffers_.find(pop->name());
+            if (it != spike_buffers_.end()) {
+                it->second.push(s.get("spike"));
+            }
+        }
+    }
+
+    // --- Phase 5: Plasticity updates (at slow boundary) ---
+    if (clock_.is_slow_boundary()) {
+        for (auto& conn : region_->connections()) {
+            conn->update_plasticity(
+                conn->source()->state(),
+                conn->target()->state(),
+                t, dt);
+        }
+    }
+
+    // --- Phase 6: Record state ---
+    for (auto& rec : recorders_) {
+        for (auto& pop : region_->populations()) {
+            if (pop->name() == rec->population_name()) {
+                rec->record(pop->state(), t);
+                break;
+            }
+        }
+    }
+
+    // --- Phase 7: Callbacks ---
+    uint64_t step_num = clock_.step();
+    for (auto& [interval, callback] : callbacks_) {
+        if (step_num > 0 && (step_num % interval) == 0) {
+            callback(*this, t);
+        }
+    }
+
+    // --- Advance clock ---
+    clock_.advance_fast();
 }
 
 // ------------------------------------------------------------------

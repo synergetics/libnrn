@@ -63,10 +63,44 @@ __global__ void adex_forward_kernel(
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    // TODO: implement AdEx dynamics
-    // This kernel is a scaffold — the integration logic will be filled in
-    // during Phase 1 development. The structure (grid, block, data pointers)
-    // is established here so the build system and dispatch path work end-to-end.
+    scalar_t v_i = v[i];
+    scalar_t w_i = w[i];
+    scalar_t ref_i = refractory[i];
+    scalar_t spike_i = static_cast<scalar_t>(0);
+
+    if (ref_i > static_cast<scalar_t>(0)) {
+        // Still refractory — decrement timer, no voltage update.
+        ref_i -= dt;
+    } else {
+        // Exponential spike-initiation current.
+        scalar_t I_exp = g_l[i] * delta_t[i]
+            * static_cast<scalar_t>(
+                exp(static_cast<double>((v_i - v_thresh[i]) / delta_t[i])));
+
+        // Forward Euler: membrane potential.
+        scalar_t dv = dt * (-g_l[i] * (v_i - v_rest[i]) + I_exp
+                            - w_i + I_syn[i] + i_bg[i]) / c_m[i];
+        v_i += dv;
+    }
+
+    // Adaptation dynamics — evolves even during refractory (Brette & Gerstner 2005).
+    scalar_t dw = dt * (a[i] * (v_i - v_rest[i]) - w_i) / tau_w[i];
+    w_i += dw;
+
+    // Spike detection (only if not refractory).
+    if (ref_i <= static_cast<scalar_t>(0) && v_i >= v_peak[i]) {
+        spike_i = static_cast<scalar_t>(1);
+        v_i = v_reset[i];
+        w_i += b[i];
+        ref_i = tau_ref[i];
+    }
+
+    // Write back.
+    v[i] = v_i;
+    w[i] = w_i;
+    spike[i] = spike_i;
+    refractory[i] = ref_i;
+    I_syn[i] = static_cast<scalar_t>(0);  // consumed
 }
 
 // ============================================================================
@@ -101,7 +135,7 @@ void adex_forward_cuda(
     const int threads = 256;
     const int blocks = (static_cast<int>(N) + threads - 1) / threads;
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(v.scalar_type(), "adex_forward_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(v.scalar_type(), "adex_forward_cuda", [&] {
         adex_forward_kernel<scalar_t><<<blocks, threads>>>(
             v.data_ptr<scalar_t>(),
             w.data_ptr<scalar_t>(),

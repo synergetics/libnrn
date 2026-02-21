@@ -63,21 +63,38 @@ void IzhikevichImpl::reset() {
 // forward()
 // ============================================================================
 
-void IzhikevichImpl::forward(nrn::State& state, nrn::Time t, nrn::Duration dt) {
-    // TODO: dispatch to CUDA kernel when tensors are on GPU.
-    //
-    // The Izhikevich dynamics (dimensionless convention) are:
-    //   dv/dt = 0.04*v^2 + 5*v + 140 - u + I_syn
-    //   du/dt = a * (b*v - u)
-    //
-    //   if v >= v_peak:
-    //       spike = 1, v = c, u += d
-    //
-    // Note: dt is in seconds (SI) but the model uses ms-scale dynamics.
-    // The kernel converts: dt_ms = dt * 1000.0
-    //
-    // Will be implemented by cuda::izhikevich_forward_cuda().
-    //
+void IzhikevichImpl::forward(nrn::State& state, nrn::Time /*t*/, nrn::Duration dt) {
+    if (v.is_cuda()) {
+        cuda::izhikevich_forward_cuda(v, u, spike, I_syn,
+                                      a, b, c, d, v_peak, dt);
+    } else {
+        // CPU path: vectorized PyTorch tensor operations.
+        // Convert dt from SI seconds to model milliseconds.
+        double dt_ms = dt * 1000.0;
+
+        // Two half-steps for v (Izhikevich's recommended numerical scheme).
+        auto dv1 = 0.04 * v * v + 5.0 * v + 140.0 - u + I_syn;
+        v = v + 0.5 * dt_ms * dv1;
+
+        auto dv2 = 0.04 * v * v + 5.0 * v + 140.0 - u + I_syn;
+        v = v + 0.5 * dt_ms * dv2;
+
+        // Recovery variable.
+        auto du = dt_ms * a * (b * v - u);
+        u = u + du;
+
+        // Spike detection.
+        auto spiked = (v >= v_peak);
+
+        // Apply reset.
+        v = torch::where(spiked, c, v);
+        u = torch::where(spiked, u + d, u);
+        spike = spiked.to(v.dtype());
+
+        // Consume synaptic current.
+        I_syn.zero_();
+    }
+
     // Publish state into the State bag.
     state.set("v", v);
     state.set("u", u);

@@ -60,5 +60,4 @@ dist/
 
 # Misc
 *.log
-core
 core.*

@@ -48,10 +48,32 @@ __global__ void lif_forward_kernel(
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    // TODO: implement LIF dynamics
-    // This kernel is a scaffold — the integration logic will be filled in
-    // during Phase 1 development. The structure (grid, block, data pointers)
-    // is established here so the build system and dispatch path work end-to-end.
+    scalar_t v_i = v[i];
+    scalar_t ref_i = refractory[i];
+    scalar_t spike_i = static_cast<scalar_t>(0);
+
+    if (ref_i > static_cast<scalar_t>(0)) {
+        // Still refractory — decrement timer, no voltage update.
+        ref_i -= dt;
+    } else {
+        // Forward Euler integration of membrane potential.
+        scalar_t dv = dt * (-(v_i - v_rest[i]) / tau_m[i]
+                            + (I_syn[i] + i_bg[i]) / c_m[i]);
+        v_i += dv;
+
+        // Spike detection.
+        if (v_i >= v_thresh[i]) {
+            spike_i = static_cast<scalar_t>(1);
+            v_i = v_reset[i];
+            ref_i = tau_ref[i];
+        }
+    }
+
+    // Write back.
+    v[i] = v_i;
+    spike[i] = spike_i;
+    refractory[i] = ref_i;
+    I_syn[i] = static_cast<scalar_t>(0);  // consumed
 }
 
 // ============================================================================
@@ -79,7 +101,7 @@ void lif_forward_cuda(
     const int threads = 256;
     const int blocks = (static_cast<int>(N) + threads - 1) / threads;
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(v.scalar_type(), "lif_forward_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(v.scalar_type(), "lif_forward_cuda", [&] {
         lif_forward_kernel<scalar_t><<<blocks, threads>>>(
             v.data_ptr<scalar_t>(),
             spike.data_ptr<scalar_t>(),
