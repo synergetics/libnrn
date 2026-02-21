@@ -32,16 +32,48 @@ struct Population {
 Population* population_create(const std::string& name,
                               NrnModule module,
                               int64_t n,
-                              torch::Device device);
+                              torch::Device /*device*/) {
+    TORCH_CHECK(n > 0, "Population '", name, "' must have at least 1 neuron");
+    auto* pop = new Population();
+    pop->name = name;
+    pop->module = module;
+    pop->n = n;
+    pop->positions = std::nullopt;
+    // State is empty at construction; populated by first forward() call.
+    return pop;
+}
 
-/// Destroy a population. Does NOT destroy the underlying module —
-/// that is the caller's responsibility.
-void population_destroy(Population* pop);
+// Destroy a population and free its resources.
+void population_destroy(Population* pop) {
+    delete pop;
+}
 
-/// Assign 3-D positions (shape [N, 3]) for distance-dependent connectivity.
-void population_set_positions(Population* pop, torch::Tensor positions);
+// Set the positions of the neurons in the population.
+// The positions tensor should have shape [n, 3].
+void population_set_positions(Population* pop, torch::Tensor positions) {
+    TORCH_CHECK(positions.dim() == 2 && positions.size(0) == pop->n &&
+                    positions.size(1) == 3,
+                "positions must have shape [", pop->n, ", 3], got ",
+                positions.sizes());
+    pop->positions = std::move(positions);
+}
 
-/// Move all state tensors and positions to the given device.
-void population_to_device(Population* pop, torch::Device device);
+// Move the population's tensors to the specified device.
+void population_to_device(Population* pop, torch::Device device) {
+    state_to_device(pop->state, device);
+    if (pop->positions.has_value()) {
+        pop->positions = pop->positions->to(device);
+    }
+    nrn_to_device(&pop->module, device);
+}
+
+// Get a string representation of the population for debugging.
+std::string population_repr(const Population* pop) {
+    std::string repr = "Population(name='" + pop->name + "', n=" + std::to_string(pop->n) + ", module=...)";
+    if (pop->positions.has_value()) {
+        repr += " with positions";
+    }
+    return repr;
+}
 
 } // namespace nrn

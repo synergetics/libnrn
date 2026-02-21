@@ -17,9 +17,6 @@ set(NRN_SOURCES
     plasticity/plasticity_rule.cpp
     plasticity/stdp.cpp
 
-    network/population.cpp
-    network/region.cpp
-
     simulation/clock.cpp
     simulation/spike_buffer.cpp
     simulation/runner.cpp
