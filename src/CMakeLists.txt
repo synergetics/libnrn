@@ -1,7 +1,4 @@
 set(NRN_SOURCES
-    core/types.cpp
-    core/state.cpp
-    core/module.cpp
 
     neuron/lif.cpp
     neuron/adex.cpp
