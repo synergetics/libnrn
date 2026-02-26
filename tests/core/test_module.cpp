@@ -41,7 +41,7 @@ static void test_to_device(void* self, torch::Device device) {
     m->data = m->data.to(device);
 }
 
-static nrn_module_ops test_ops = {
+static nrn_ops test_ops = {
     test_forward,
     test_reset,
     test_state_vars,
