@@ -7,7 +7,7 @@ namespace synapse {
 // Ops table
 // ---------------------------------------------------------------------------
 
-nrn_module_ops dexp_synapse_ops = {
+nrn_ops dexp_synapse_ops = {
     .forward    = dexp_synapse_forward,
     .reset      = dexp_synapse_reset,
     .state_vars = dexp_synapse_state_vars,

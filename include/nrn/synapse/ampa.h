@@ -57,7 +57,7 @@ inline void ampa_to_device(AMPASynapse* syn, torch::Device device) {
 }
 
 // Ops table
-extern nrn_module_ops ampa_ops;
+extern nrn_ops ampa_ops;
 
 // Wrap as generic module handle
 inline NrnModule ampa_as_module(AMPASynapse* syn) {

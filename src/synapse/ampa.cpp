@@ -7,7 +7,7 @@ namespace synapse {
 // Ops table
 // ---------------------------------------------------------------------------
 
-nrn_module_ops ampa_ops = {
+nrn_ops ampa_ops = {
     .forward    = ampa_forward,
     .reset      = ampa_reset,
     .state_vars = ampa_state_vars,

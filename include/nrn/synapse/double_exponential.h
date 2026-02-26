@@ -53,7 +53,7 @@ inline void dexp_synapse_to_device(DoubleExponentialSynapse* syn, torch::Device 
 }
 
 // Ops table
-extern nrn_module_ops dexp_synapse_ops;
+extern nrn_ops dexp_synapse_ops;
 
 // Wrap as generic module handle
 inline NrnModule dexp_synapse_as_module(DoubleExponentialSynapse* syn) {

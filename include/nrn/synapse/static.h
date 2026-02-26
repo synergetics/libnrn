@@ -50,7 +50,7 @@ inline void static_synapse_to_device(StaticSynapse* syn, torch::Device device) {
 }
 
 // Ops table
-extern nrn_module_ops static_synapse_ops;
+extern nrn_ops static_synapse_ops;
 
 // Wrap as generic module handle
 inline NrnModule static_synapse_as_module(StaticSynapse* syn) {

@@ -7,7 +7,7 @@ namespace synapse {
 // Ops table
 // ---------------------------------------------------------------------------
 
-nrn_module_ops exp_synapse_ops = {
+nrn_ops exp_synapse_ops = {
     .forward    = exp_synapse_forward,
     .reset      = exp_synapse_reset,
     .state_vars = exp_synapse_state_vars,

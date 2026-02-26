@@ -50,7 +50,7 @@ inline void exp_synapse_to_device(ExponentialSynapse* syn, torch::Device device)
 }
 
 // Ops table
-extern nrn_module_ops exp_synapse_ops;
+extern nrn_ops exp_synapse_ops;
 
 // Wrap as generic module handle
 inline NrnModule exp_synapse_as_module(ExponentialSynapse* syn) {

@@ -7,7 +7,7 @@ namespace synapse {
 // Ops table
 // ---------------------------------------------------------------------------
 
-nrn_module_ops static_synapse_ops = {
+nrn_ops static_synapse_ops = {
     .forward    = static_synapse_forward,
     .reset      = static_synapse_reset,
     .state_vars = static_synapse_state_vars,
