@@ -82,7 +82,7 @@ inline void adex_to_device(AdExNeuron* adex, torch::Device device) {
 }
 
 // Ops table
-extern nrn_module_ops adex_ops;
+extern nrn_ops adex_ops;
 
 // Wrap as generic module handle
 inline NrnModule adex_as_module(AdExNeuron* adex) {

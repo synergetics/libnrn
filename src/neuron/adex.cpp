@@ -31,7 +31,7 @@ void adex_forward_cuda(
 // Ops table
 // ---------------------------------------------------------------------------
 
-nrn_module_ops adex_ops = {
+nrn_ops adex_ops = {
     .forward   = adex_forward,
     .reset     = adex_reset,
     .state_vars = adex_state_vars,
