@@ -74,7 +74,7 @@ inline void lif_to_device(LIFNeuron* lif, torch::Device device) {
 }
 
 // Ops table
-extern nrn_module_ops lif_ops;
+extern nrn_ops lif_ops;
 
 // Wrap as generic module handle
 inline NrnModule lif_as_module(LIFNeuron* lif) {

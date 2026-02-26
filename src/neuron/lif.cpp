@@ -24,7 +24,7 @@ void lif_forward_cuda(
 // Ops table
 // ---------------------------------------------------------------------------
 
-nrn_module_ops lif_ops = {
+nrn_ops lif_ops = {
     .forward   = lif_forward,
     .reset     = lif_reset,
     .state_vars = lif_state_vars,

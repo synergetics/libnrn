@@ -72,7 +72,7 @@ inline void izh_to_device(IzhikevichNeuron* izh, torch::Device device) {
 }
 
 // Ops table
-extern nrn_module_ops izh_ops;
+extern nrn_ops izh_ops;
 
 // Wrap as generic module handle
 inline NrnModule izh_as_module(IzhikevichNeuron* izh) {

@@ -22,7 +22,7 @@ void izhikevich_forward_cuda(
 // Ops table
 // ---------------------------------------------------------------------------
 
-nrn_module_ops izh_ops = {
+nrn_ops izh_ops = {
     .forward   = izh_forward,
     .reset     = izh_reset,
     .state_vars = izh_state_vars,
