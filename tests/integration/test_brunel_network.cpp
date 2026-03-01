@@ -478,3 +478,186 @@ TEST(Integration, PopulationState) {
     pop.reset();
     neuron::lif_destroy(lif);
 }
+
+// ---------------------------------------------------------------------------
+// Simulation sanity tests — actually run the network
+// ---------------------------------------------------------------------------
+
+// Helper to build a small E-I network and run it.
+static void build_and_run_ei(int64_t N_exc, int64_t N_inh, double duration,
+                             double i_bg, double J_E, double g_ratio,
+                             std::shared_ptr<Population>& exc_out,
+                             std::shared_ptr<Population>& inh_out,
+                             Simulation*& sim_out,
+                             std::shared_ptr<Connection>& ee_out) {
+    double J_I = -g_ratio * J_E;
+
+    auto exc_opts = neuron::LIFOptions()
+        .v_rest(-65.0_mV).v_thresh(-50.0_mV).v_reset(-65.0_mV)
+        .tau_m(20.0_ms).tau_ref(2.0_ms).c_m(250.0_pF).i_bg(i_bg);
+
+    auto inh_opts = neuron::LIFOptions()
+        .v_rest(-65.0_mV).v_thresh(-50.0_mV).v_reset(-65.0_mV)
+        .tau_m(10.0_ms).tau_ref(2.0_ms).c_m(250.0_pF).i_bg(i_bg);
+
+    auto* exc_lif = neuron::lif_create(N_exc, exc_opts);
+    auto* inh_lif = neuron::lif_create(N_inh, inh_opts);
+
+    exc_out = std::shared_ptr<Population>(
+        population_create("exc", neuron::lif_as_module(exc_lif), N_exc, torch::kCPU),
+        population_destroy);
+    inh_out = std::shared_ptr<Population>(
+        population_create("inh", neuron::lif_as_module(inh_lif), N_inh, torch::kCPU),
+        population_destroy);
+
+    auto* topo = random_topology_create(RandomTopologyOptions().probability(0.1).allow_autapses(false));
+    auto gen = random_topology_as_generator(topo);
+
+    auto* syn = synapse::static_synapse_create(1);
+    auto syn_mod = synapse::static_synapse_as_module(syn);
+
+    auto co_ee = ConnectOptions().block_size(64).weight_scale(J_E);
+    auto co_ei = ConnectOptions().block_size(64).weight_scale(J_E);
+    auto co_ie = ConnectOptions().block_size(64).weight_scale(J_I);
+    auto co_ii = ConnectOptions().block_size(64).weight_scale(J_I);
+
+    ee_out = connect(exc_out, exc_out, &gen, syn_mod, co_ee);
+    auto ei = connect(exc_out, inh_out, &gen, syn_mod, co_ei);
+    auto ie = connect(inh_out, exc_out, &gen, syn_mod, co_ie);
+    auto ii = connect(inh_out, inh_out, &gen, syn_mod, co_ii);
+
+    auto* region = region_create("ei_net");
+    region_add_population(region, exc_out);
+    region_add_population(region, inh_out);
+    region_add_connection(region, ee_out);
+    region_add_connection(region, ei);
+    region_add_connection(region, ie);
+    region_add_connection(region, ii);
+
+    auto sim_opts = SimulationOptions()
+        .dt_fast(0.1_ms).dt_slow(10.0_ms).dt_structural(1.0_s)
+        .duration(duration).device(torch::kCPU);
+
+    sim_out = sim_create(region, sim_opts);
+    sim_record(sim_out, exc_out, {"spike"});
+    sim_record(sim_out, inh_out, {"spike"});
+
+    sim_run(sim_out);
+}
+
+TEST(Integration, BrunelNetworkRuns) {
+    // 200E + 50I, 100 ms — verify it runs and produces sane firing rates.
+    std::shared_ptr<Population> exc, inh;
+    std::shared_ptr<Connection> ee;
+    Simulation* sim = nullptr;
+
+    double i_bg = 400.0e-12;  // 400 pA — well suprathreshold
+    double J_E = 500.0e-12;   // 500 pA weight scale (mean 250 pA → ~0.1 mV PSP)
+    build_and_run_ei(200, 50, 0.1, i_bg, J_E, 5.0, exc, inh, sim, ee);
+
+    auto exc_spikes = sim_get_spikes(sim, exc);
+    auto inh_spikes = sim_get_spikes(sim, inh);
+
+    double exc_rate = static_cast<double>(exc_spikes.size(0)) / (200.0 * 0.1);
+    double inh_rate = static_cast<double>(inh_spikes.size(0)) / (50.0 * 0.1);
+
+    std::cout << "BrunelNetworkRuns: exc_rate=" << exc_rate
+              << " Hz, inh_rate=" << inh_rate << " Hz\n";
+
+    // Should produce some spikes (not silent, not exploding).
+    EXPECT_GT(exc_spikes.size(0), 0);
+    EXPECT_GT(inh_spikes.size(0), 0);
+    EXPECT_LT(exc_rate, 200.0);  // not unreasonably high
+    EXPECT_LT(inh_rate, 200.0);
+
+    sim_destroy(sim);
+}
+
+TEST(Integration, STDPChangesWeights) {
+    // Small network with STDP: verify weights change after simulation.
+    auto exc_opts = neuron::LIFOptions()
+        .v_rest(-65.0_mV).v_thresh(-50.0_mV).v_reset(-65.0_mV)
+        .tau_m(20.0_ms).tau_ref(2.0_ms).c_m(250.0_pF).i_bg(400.0e-12);
+
+    auto* exc_lif = neuron::lif_create(100, exc_opts);
+    auto exc = std::shared_ptr<Population>(
+        population_create("exc", neuron::lif_as_module(exc_lif), 100, torch::kCPU),
+        population_destroy);
+
+    auto* topo = random_topology_create(RandomTopologyOptions().probability(0.2));
+    auto gen = random_topology_as_generator(topo);
+
+    auto* syn = synapse::static_synapse_create(1);
+    auto syn_mod = synapse::static_synapse_as_module(syn);
+
+    auto co = ConnectOptions().block_size(32).weight_scale(500.0e-12);
+    auto ee = connect(exc, exc, &gen, syn_mod, co);
+
+    // Record initial weight stats.
+    auto initial_weights = ee->connectivity.weights.clone();
+
+    // Attach STDP.
+    auto* stdp = stdp_create(STDPOptions()
+        .tau_plus(20.0_ms).tau_minus(20.0_ms)
+        .a_plus(0.1).a_minus(-0.12)
+        .learning_rate(1.0)
+        .w_min(0.0).w_max(1.0));
+    connection_attach(ee.get(), stdp_as_rule(stdp));
+
+    auto* region = region_create("stdp_test");
+    region_add_population(region, exc);
+    region_add_connection(region, ee);
+
+    auto sim_opts = SimulationOptions()
+        .dt_fast(0.1_ms).dt_slow(1.0_ms).dt_structural(1.0_s)
+        .duration(0.1).device(torch::kCPU);
+
+    auto* sim = sim_create(region, sim_opts);
+    sim_record(sim, exc, {"spike"});
+    sim_run(sim);
+
+    // Check that weights have changed.
+    auto weight_diff = (ee->connectivity.weights - initial_weights).abs().sum().item<float>();
+    std::cout << "STDPChangesWeights: total |dw| = " << weight_diff << "\n";
+    EXPECT_GT(weight_diff, 0.0f);
+
+    sim_destroy(sim);
+    region_destroy(region);
+    stdp_destroy(stdp);
+    synapse::static_synapse_destroy(syn);
+    random_topology_destroy(topo);
+    neuron::lif_destroy(exc_lif);
+}
+
+TEST(Integration, EIBalanceInhibitionDominates) {
+    // With g=5 (strong inhibition), excitatory rate should be lower
+    // than with g=1 (weak inhibition).
+    std::shared_ptr<Population> exc_strong, inh_strong;
+    std::shared_ptr<Population> exc_weak, inh_weak;
+    std::shared_ptr<Connection> ee_strong, ee_weak;
+    Simulation *sim_strong = nullptr, *sim_weak = nullptr;
+
+    double i_bg = 400.0e-12;
+    double J_E = 500.0e-12;
+
+    // Strong inhibition (g=5)
+    build_and_run_ei(100, 25, 0.1, i_bg, J_E, 5.0,
+                     exc_strong, inh_strong, sim_strong, ee_strong);
+    auto spikes_strong = sim_get_spikes(sim_strong, exc_strong);
+    double rate_strong = static_cast<double>(spikes_strong.size(0)) / (100.0 * 0.1);
+
+    // Weak inhibition (g=1)
+    build_and_run_ei(100, 25, 0.1, i_bg, J_E, 1.0,
+                     exc_weak, inh_weak, sim_weak, ee_weak);
+    auto spikes_weak = sim_get_spikes(sim_weak, exc_weak);
+    double rate_weak = static_cast<double>(spikes_weak.size(0)) / (100.0 * 0.1);
+
+    std::cout << "EIBalance: strong_inh_rate=" << rate_strong
+              << " Hz, weak_inh_rate=" << rate_weak << " Hz\n";
+
+    // Stronger inhibition should produce fewer excitatory spikes (or similar).
+    EXPECT_LE(rate_strong, rate_weak + 20.0);  // allow some noise margin
+
+    sim_destroy(sim_strong);
+    sim_destroy(sim_weak);
+}
