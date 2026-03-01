@@ -29,7 +29,7 @@ struct Population {
 
 /// Create a population. The NrnModule should already be initialized
 /// (e.g. via lif_as_module(lif_create(...))).
-Population* population_create(const std::string& name,
+inline Population* population_create(const std::string& name,
                               NrnModule module,
                               int64_t n,
                               torch::Device /*device*/) {
@@ -44,13 +44,13 @@ Population* population_create(const std::string& name,
 }
 
 // Destroy a population and free its resources.
-void population_destroy(Population* pop) {
+inline void population_destroy(Population* pop) {
     delete pop;
 }
 
 // Set the positions of the neurons in the population.
 // The positions tensor should have shape [n, 3].
-void population_set_positions(Population* pop, torch::Tensor positions) {
+inline void population_set_positions(Population* pop, torch::Tensor positions) {
     TORCH_CHECK(positions.dim() == 2 && positions.size(0) == pop->n &&
                     positions.size(1) == 3,
                 "positions must have shape [", pop->n, ", 3], got ",
@@ -59,7 +59,7 @@ void population_set_positions(Population* pop, torch::Tensor positions) {
 }
 
 // Move the population's tensors to the specified device.
-void population_to_device(Population* pop, torch::Device device) {
+inline void population_to_device(Population* pop, torch::Device device) {
     state_to_device(pop->state, device);
     if (pop->positions.has_value()) {
         pop->positions = pop->positions->to(device);
@@ -68,7 +68,7 @@ void population_to_device(Population* pop, torch::Device device) {
 }
 
 // Get a string representation of the population for debugging.
-std::string population_repr(const Population* pop) {
+inline std::string population_repr(const Population* pop) {
     std::string repr = "Population(name='" + pop->name + "', n=" + std::to_string(pop->n) + ", module=...)";
     if (pop->positions.has_value()) {
         repr += " with positions";
