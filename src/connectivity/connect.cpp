@@ -112,6 +112,11 @@ std::shared_ptr<Connection> connect(
                                 options.block_size(),
                                 torch::kCPU);
 
+    // Scale weights by user-specified factor (e.g., negative for inhibitory).
+    if (options.weight_scale() != 1.0) {
+        ct.weights.mul_(options.weight_scale());
+    }
+
     auto* conn = connection_create(
         std::move(source),
         std::move(target),
