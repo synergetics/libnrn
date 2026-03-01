@@ -60,3 +60,11 @@ dist/
 
 # Misc
 *.log
+
+tests/test_brunel_network
+tests/test_connectivity_tensor
+tests/test_module
+tests/test_neuron_dynamics
+tests/test_state
+tests/test_stdp
+tests/test_topology
