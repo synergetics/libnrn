@@ -1,7 +1,6 @@
 #include <nrn/simulation/runner.h>
 
 #include <cmath>
-#include <stdexcept>
 
 #include <nrn/core/module.h>
 #include <nrn/connectivity/connect.h>
@@ -22,19 +21,38 @@ Simulation* sim_create(Region* region, SimulationOptions options) {
                        sim->options.dt_slow(),
                        sim->options.dt_structural());
 
-    // Pre-create spike buffers for every population.
+    // Pre-create spike buffers for every population on the target device.
+    auto device = sim->options.device();
     if (region) {
         for (const auto& pop : region->populations) {
             sim->spike_buffers.emplace(
                 pop->name,
                 SpikeBuffer(pop->n,
                             sim->options.max_delay_steps(),
-                            torch::kCPU));
+                            device));
         }
 
         // Initialize population states by calling forward(dt=0).
+        // This populates state bags on CPU first.
         for (auto& pop : region->populations) {
             nrn_forward(&pop->module, pop->state, 0.0, 0.0);
+        }
+
+        // Migrate all populations and connections to target device.
+        if (device != torch::kCPU) {
+            for (auto& pop : region->populations) {
+                population_to_device(pop.get(), device);
+            }
+            for (auto& conn : region->connections) {
+                conn->connectivity.to(device);
+            }
+            // Re-call forward(dt=0) to restore state bag aliasing.
+            // After to_device(), the state bag tensors and the neuron struct
+            // tensors are different GPU tensors. Re-publishing via forward()
+            // makes the state bag point at the neuron struct's GPU tensors.
+            for (auto& pop : region->populations) {
+                nrn_forward(&pop->module, pop->state, 0.0, 0.0);
+            }
         }
     }
 

@@ -22,3 +22,5 @@ nrn_add_test(test_clock                  simulation/test_clock.cpp)
 nrn_add_test(test_spike_buffer           simulation/test_spike_buffer.cpp)
 
 nrn_add_test(test_brunel_network         integration/test_brunel_network.cpp)
+nrn_add_test(test_gpu_pipeline           integration/test_gpu_pipeline.cpp)
+nrn_add_test(test_config                 config/test_config.cpp)

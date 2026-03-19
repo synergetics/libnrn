@@ -1,0 +1,84 @@
+# Brunel Balanced E-I Network Configuration
+#
+# Parameters following Brunel (2000) — asynchronous irregular (AI) regime.
+# All values in SI units (seconds, volts, farads, amperes).
+
+simulation:
+  duration: 0.2          # 200 ms
+  dt_fast: 0.0001        # 0.1 ms
+  dt_slow: 0.01          # 10 ms
+  device: cpu             # or "cuda"
+
+region_name: brunel_network
+
+populations:
+  - name: excitatory
+    model: LIF
+    count: 4000
+    params:
+      v_rest: -0.065       # -65 mV
+      v_thresh: -0.050     # -50 mV
+      v_reset: -0.065      # -65 mV
+      tau_m: 0.020         # 20 ms
+      tau_ref: 0.002       # 2 ms
+      c_m: 250.0e-12       # 250 pF
+      i_bg: 380.0e-12      # ~2x threshold current
+
+  - name: inhibitory
+    model: LIF
+    count: 1000
+    params:
+      v_rest: -0.065
+      v_thresh: -0.050
+      v_reset: -0.065
+      tau_m: 0.010         # 10 ms (faster inhibitory neurons)
+      tau_ref: 0.002
+      c_m: 250.0e-12
+      i_bg: 380.0e-12
+
+connections:
+  - source: excitatory
+    target: excitatory
+    topology: random
+    topology_params:
+      probability: 0.1
+      allow_autapses: false
+    block_size: 256
+    weight_scale: 500.0e-12    # J_E: mean ~250 pA → ~0.1 mV PSP
+    default_delay: 0.001
+    plasticity: stdp
+    plasticity_params:
+      tau_plus: 0.020
+      tau_minus: 0.020
+      a_plus: 0.01
+      a_minus: -0.012
+      learning_rate: 0.001
+      w_min: 0.0
+      w_max: 2500.0e-12       # 5x J_E
+
+  - source: excitatory
+    target: inhibitory
+    topology: random
+    topology_params:
+      probability: 0.1
+    block_size: 256
+    weight_scale: 500.0e-12
+    default_delay: 0.001
+
+  - source: inhibitory
+    target: excitatory
+    topology: random
+    topology_params:
+      probability: 0.1
+    block_size: 256
+    weight_scale: -2500.0e-12  # J_I = -g * J_E (g=5)
+    default_delay: 0.001
+
+  - source: inhibitory
+    target: inhibitory
+    topology: random
+    topology_params:
+      probability: 0.1
+    block_size: 256
+    weight_scale: -2500.0e-12
+    default_delay: 0.001

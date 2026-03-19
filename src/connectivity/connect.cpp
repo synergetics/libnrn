@@ -41,13 +41,20 @@ void connection_deliver(Connection* conn, const torch::Tensor& spikes,
     }
     auto I_syn = state_get(target_state, "I_syn");
 
-    auto W_eff = conn->connectivity.effective_weights();
-
-    const auto& bi = conn->connectivity.block_index;
-    int64_t B = conn->connectivity.block_size;
-    int64_t n_src = conn->connectivity.n_source;
-    int64_t n_tgt = conn->connectivity.n_target;
+    const auto& ct = conn->connectivity;
+    const auto& bi = ct.block_index;
+    int64_t B = ct.block_size;
+    int64_t n_src = ct.n_source;
+    int64_t n_tgt = ct.n_target;
     int64_t n_tgt_blocks = bi.n_rows();
+    int64_t n_blocks = bi.n_blocks();
+
+    if (n_blocks == 0) return;
+
+    // Both CPU and GPU paths iterate the CSR block structure on CPU
+    // and dispatch torch::mv per block. On GPU tensors, torch::mv
+    // dispatches to cuBLAS automatically.
+    auto W_eff = ct.effective_weights();
 
     auto row_ptr_cpu = bi.row_ptr.to(torch::kCPU);
     auto col_idx_cpu = bi.col_idx.to(torch::kCPU);

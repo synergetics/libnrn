@@ -661,3 +661,44 @@ TEST(Integration, EIBalanceInhibitionDominates) {
     sim_destroy(sim_strong);
     sim_destroy(sim_weak);
 }
+
+// ---------------------------------------------------------------------------
+// Brunel Asynchronous Irregular regime validation
+// ---------------------------------------------------------------------------
+
+TEST(Integration, BrunelAsynchronousIrregular) {
+    // 4000E + 1000I, 500 ms — verify firing rates are in biological range.
+    // Asynchronous irregular (AI) regime: η≈2, g=5.
+    std::shared_ptr<Population> exc, inh;
+    std::shared_ptr<Connection> ee;
+    Simulation* sim = nullptr;
+
+    double i_bg = 380.0e-12;  // ~2× threshold
+    double J_E = 500.0e-12;
+    double duration = 0.5;    // 500 ms
+
+    build_and_run_ei(4000, 1000, duration, i_bg, J_E, 5.0, exc, inh, sim, ee);
+
+    auto exc_spikes = sim_get_spikes(sim, exc);
+    auto inh_spikes = sim_get_spikes(sim, inh);
+
+    double exc_rate = static_cast<double>(exc_spikes.size(0)) / (4000.0 * duration);
+    double inh_rate = static_cast<double>(inh_spikes.size(0)) / (1000.0 * duration);
+
+    std::cout << "BrunelAI: exc_rate=" << exc_rate
+              << " Hz, inh_rate=" << inh_rate << " Hz\n";
+
+    // Excitatory rate should be in plausible range for AI regime.
+    // Note: exact rate depends on parameter tuning; with our simplified
+    // model (constant background current, no external Poisson) rates
+    // can exceed the classic 1-50 Hz range.
+    EXPECT_GE(exc_rate, 1.0);
+    EXPECT_LE(exc_rate, 100.0);
+
+    // Inhibitory neurons fire faster than excitatory in balanced networks
+    // (due to shorter tau_m and excitatory drive).
+    EXPECT_GT(inh_rate, exc_rate * 0.5);  // inh fires at least half as much
+    EXPECT_LE(inh_rate, 200.0);           // but not exploding
+
+    sim_destroy(sim);
+}

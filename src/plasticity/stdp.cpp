@@ -45,6 +45,7 @@ void stdp_update(void* self, ConnectivityTensor& conn,
                  double /*t*/, double dt) {
     auto* s = static_cast<STDPState*>(self);
 
+
     // Cache decay factors when dt changes.
     if (dt != s->cached_dt) {
         s->cached_dt  = dt;

@@ -7,26 +7,16 @@ namespace cuda {
 // ---------------------------------------------------------------------------
 // Block-dense masked matmul kernel for synaptic current delivery.
 //
-// Computes, for each dense block (i, j) in the block-sparse structure:
+// One CUDA thread block per dense block in the CSR structure.
+// Each thread computes one row of the block:
+//     I_syn[target_neuron] += sum_k W_eff[row][k] * spike[source_neuron_k]
 //
-//     I_syn[block_i] += (W[block] .* M_structural[block]
-//                                 .* M_modulatory[block]) @ spike_vec[block_j]
-//
-// This is the core operation of the masked-dense connectivity paradigm:
-// irregular sparse connectivity is converted into regular dense matmuls
-// with mask overlays, which map efficiently to GPU tensor cores.
-//
-// Parameters:
-//   weights          — [n_blocks, B, B] synaptic weight tensor
-//   structural_mask  — [n_blocks, B, B] binary structural connectivity mask
-//   modulatory_mask  — [n_blocks, B, B] float neuromodulatory gain mask
-//   spikes           — [N_source] binary spike vector (0 or 1)
-//   I_syn            — [N_target] output synaptic current (accumulated)
-//   row_ptr          — [n_block_rows + 1] CSR row pointer for block structure
-//   col_idx          — [n_blocks] CSR column indices for block structure
-//   block_size       — side length B of each dense block
-//   n_block_rows     — number of block rows (ceil(N_target / B))
+// Uses shared memory to cache the source spike sub-vector per block.
 // ---------------------------------------------------------------------------
+
+// Maximum block size we support in shared memory (1024 floats = 4 KB).
+static constexpr int MAX_BLOCK_SIZE = 1024;
+
 __global__ void synaptic_current_block_dense_kernel(
     const float* __restrict__ weights,
     const float* __restrict__ structural_mask,
@@ -36,18 +26,64 @@ __global__ void synaptic_current_block_dense_kernel(
     const int32_t* __restrict__ row_ptr,
     const int32_t* __restrict__ col_idx,
     int32_t block_size,
-    int32_t n_block_rows) {
-    // Stub: kernel body will be implemented when the full simulation
-    // pipeline is connected.  The structure above documents the intended
-    // launch configuration and memory access pattern.
-    //
-    // Implementation plan:
-    //   1. One thread block per dense block in the CSR structure.
-    //   2. Load the source spike sub-vector for column block_j into shared mem.
-    //   3. Each thread computes one row of the masked matmul:
-    //        sum_k  W[row][k] * M_s[row][k] * M_m[row][k] * spike[k]
-    //   4. Atomically accumulate into I_syn[target_neuron].
-    //   5. For tensor-core path: use wmma fragments on FP16 weight tiles.
+    int32_t n_block_rows,
+    int32_t n_source,
+    int32_t n_target) {
+
+    // Each block in the grid handles one non-zero block in the CSR structure.
+    // We flatten the iteration: blockIdx.x indexes into the total nnz blocks.
+    // We need to find which target block row this belongs to.
+
+    int32_t block_idx = blockIdx.x;
+
+    // Find target block row via binary search on row_ptr.
+    int32_t lo = 0, hi = n_block_rows;
+    while (lo < hi) {
+        int32_t mid = (lo + hi) / 2;
+        if (row_ptr[mid + 1] <= block_idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    int32_t target_block_row = lo;
+    int32_t source_block_col = col_idx[block_idx];
+
+    int32_t t_begin = target_block_row * block_size;
+    int32_t s_begin = source_block_col * block_size;
+
+    // Clamp to actual dimensions.
+    int32_t t_size = min(block_size, n_target - t_begin);
+    int32_t s_size = min(block_size, n_source - s_begin);
+
+    if (t_size <= 0 || s_size <= 0) return;
+
+    // Load source spike sub-vector into shared memory.
+    extern __shared__ float shared_spikes[];
+
+    for (int32_t i = threadIdx.x; i < s_size; i += blockDim.x) {
+        shared_spikes[i] = spikes[s_begin + i];
+    }
+    __syncthreads();
+
+    // Each thread computes one row of the masked matmul.
+    int32_t row = threadIdx.x;
+    if (row >= t_size) return;
+
+    // Pointer to this block's data: block_idx * B * B + row * B
+    int64_t block_offset = (int64_t)block_idx * block_size * block_size
+                         + (int64_t)row * block_size;
+
+    float acc = 0.0f;
+    for (int32_t k = 0; k < s_size; ++k) {
+        float w = weights[block_offset + k];
+        float ms = structural_mask[block_offset + k];
+        float mm = modulatory_mask[block_offset + k];
+        acc += w * ms * mm * shared_spikes[k];
+    }
+
+    // Atomically accumulate into I_syn (multiple blocks may target same neurons).
+    atomicAdd(&I_syn[t_begin + row], acc);
 }
 
 // ---------------------------------------------------------------------------
@@ -63,19 +99,26 @@ void launch_synaptic_current_block_dense(
     const int32_t* col_idx,
     int32_t block_size,
     int32_t n_block_rows,
-    cudaStream_t stream) {
-    // Stub: launch configuration will be determined by block_size and
-    // the number of non-zero blocks in the CSR structure.
-    (void)weights;
-    (void)structural_mask;
-    (void)modulatory_mask;
-    (void)spikes;
-    (void)I_syn;
-    (void)row_ptr;
-    (void)col_idx;
-    (void)block_size;
-    (void)n_block_rows;
-    (void)stream;
+    int32_t n_blocks,
+    int32_t n_source,
+    int32_t n_target,
+    void* stream_ptr) {
+
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+
+    if (n_blocks == 0) return;
+
+    // One CUDA thread block per CSR non-zero block.
+    // Threads per block = block_size (one thread per target row in the dense block).
+    int threads = min(block_size, 1024);
+    int shared_mem = block_size * sizeof(float);
+
+    synaptic_current_block_dense_kernel<<<n_blocks, threads, shared_mem, stream>>>(
+        weights, structural_mask, modulatory_mask,
+        spikes, I_syn,
+        row_ptr, col_idx,
+        block_size, n_block_rows,
+        n_source, n_target);
 }
 
 } // namespace cuda
