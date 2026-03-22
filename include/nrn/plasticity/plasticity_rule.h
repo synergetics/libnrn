@@ -1,3 +1,17 @@
+/// @file plasticity_rule.h
+/// @brief Type-erased PlasticityRule handle and plasticity_ops dispatch table.
+///
+/// @details
+/// PlasticityRule operates *on* ConnectivityTensor objects rather than
+/// maintaining independent module state.  A rule is attached to a Connection
+/// and invoked by the simulation loop at the appropriate timescale (Phase 5
+/// of graph_step()).
+///
+/// Concrete rules (STDP, BCM, homeostatic scaling, …) provide a static
+/// @c plasticity_ops table and are wrapped with @c *_as_rule().
+///
+/// @see STDPState, stdp_as_rule(), PlasticityRule
+
 #pragma once
 
 #include <nrn/core/types.h>
@@ -5,61 +19,68 @@
 
 namespace nrn {
 
-// Forward declaration -- avoid pulling in the full connectivity header.
+// Forward declaration.
 struct ConnectivityTensor;
 
-/// Ops table for synaptic plasticity rules.
+/// @brief Ops table for synaptic plasticity rules.
 ///
-/// PlasticityRule operates *on* connectivity tensors rather than maintaining
-/// its own module state -- it is attached to a Connection and invoked by
-/// the simulation loop at the appropriate timescale.
-///
-/// Concrete rules (STDP, BCM, homeostatic scaling, etc.) provide an ops
-/// table with function pointers for initialize, update, and reset.
+/// @details
+/// Each concrete rule provides a static instance of this struct.
+/// The three operations cover the full lifecycle: one-time setup,
+/// per-step update, and reset.
 struct plasticity_ops {
-    /// One-time setup: allocate eligibility traces or auxiliary tensors
-    /// inside the ConnectivityTensor (e.g., trace_pre, trace_post).
+    /// @brief One-time initialisation: allocate eligibility traces in @p conn.
+    ///
+    /// @param self  Opaque pointer to the concrete rule state.
+    /// @param conn  ConnectivityTensor to extend with trace tensors.
     void (*initialize)(void* self, ConnectivityTensor& conn);
 
-    /// Apply the learning rule for one update step.
+    /// @brief Apply the learning rule for one simulation step.
     ///
     /// @param self       Opaque pointer to the concrete rule state.
-    /// @param conn       Connectivity tensor to modify (weights, masks).
+    /// @param conn       ConnectivityTensor whose weights are updated in place.
     /// @param pre_state  State of the presynaptic population.
     /// @param post_state State of the postsynaptic population.
-    /// @param t          Current simulation time.
-    /// @param dt         Timestep duration.
+    /// @param t          Current simulation time (s).
+    /// @param dt         Timestep duration (s).
     void (*update)(void* self, ConnectivityTensor& conn,
                    const State& pre_state, const State& post_state,
                    double t, double dt);
 
-    /// Reset all internal state (traces, accumulators) to initial values.
+    /// @brief Reset all internal traces and accumulators to their initial values.
+    ///
+    /// @param self  Opaque pointer to the concrete rule state.
     void (*reset)(void* self);
 };
 
-/// Type-erased plasticity rule handle.
+/// @brief Type-erased handle to any plasticity rule.
 ///
-/// Holds an opaque pointer to the concrete rule state and a pointer to
-/// the ops table that dispatches to the correct implementation.
+/// @details
+/// Holds an opaque @c void* to the concrete rule state and a pointer to
+/// its ops table.  Wrap concrete rules with e.g. @c stdp_as_rule().
+///
+/// @see plasticity_ops, stdp_as_rule()
 struct PlasticityRule {
-    void* impl;
-    plasticity_ops* ops;
+    void* impl;           ///< Opaque pointer to the concrete rule struct.
+    plasticity_ops* ops;  ///< Dispatch table.
 };
 
-// ---------------------------------------------------------------------------
-// Dispatch helpers
-// ---------------------------------------------------------------------------
-
+/// @brief Initialise a plasticity rule on a ConnectivityTensor.
+/// @see plasticity_ops::initialize
 inline void plasticity_initialize(PlasticityRule* r, ConnectivityTensor& conn) {
     r->ops->initialize(r->impl, conn);
 }
 
+/// @brief Apply one plasticity update step.
+/// @see plasticity_ops::update
 inline void plasticity_update(PlasticityRule* r, ConnectivityTensor& conn,
                               const State& pre, const State& post,
                               double t, double dt) {
     r->ops->update(r->impl, conn, pre, post, t, dt);
 }
 
+/// @brief Reset all rule state (traces, accumulators).
+/// @see plasticity_ops::reset
 inline void plasticity_reset(PlasticityRule* r) {
     r->ops->reset(r->impl);
 }

@@ -1,6 +1,13 @@
-#pragma once
+/// @file connectivity.h
+/// @brief Aggregate include for the connectivity subsystem.
+///
+/// @details
+/// Pulls in ConnectivityTensor, ConnectOptions, the connect() free function,
+/// and all built-in topology generators (Random, DistanceDependent).
+///
+/// @see ConnectivityTensor, connect(), TopologyGenerator
 
-/// Aggregate include for the connectivity subsystem.
+#pragma once
 
 #include <nrn/connectivity/connectivity_tensor.h>
 #include <nrn/connectivity/options.h>

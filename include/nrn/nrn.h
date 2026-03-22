@@ -1,12 +1,16 @@
-#pragma once
-
 /// @file nrn.h
-/// Master include for the libnrn library.
+/// @brief Master include for the libnrn library.
 ///
+/// @details
 /// Including this single header pulls in every public component:
 /// core types, neuron models, synapse models, connectivity, plasticity,
 /// network composition, simulation runner, monitoring, and configuration.
-/// It also brings the unit-literal operators into scope.
+/// It also brings unit-literal operators (e.g. @c 0.1_ms, @c -70.6_mV)
+/// into scope via @c using @c namespace @c nrn::literals.
+///
+/// @see nrn::literals
+
+#pragma once
 
 // -- Core ------------------------------------------------------------------
 #include <nrn/core/types.h>

@@ -1,3 +1,17 @@
+/// @file spike_buffer.h
+/// @brief Dense ring-buffer for synaptic spike delay lines.
+///
+/// @details
+/// Stores a binary (@c float 0/1) tensor of shape @c [max_delay_steps, N]
+/// where @c N is the number of neurons.  Each call to @c push() writes the
+/// current spike vector into the ring buffer at the write head and advances
+/// the head.  @c read(delay) returns the spike vector that was pushed
+/// @p delay_steps steps ago.
+///
+/// All storage lives on the specified @c torch::Device (typically CUDA).
+///
+/// @see Simulation, sim_create()
+
 #pragma once
 
 #include <cstdint>
@@ -6,54 +20,59 @@
 
 namespace nrn {
 
-/// Dense ring-buffer for spike delay lines.
+/// @brief Dense ring-buffer for spike delay lines.
 ///
-/// Stores a binary (float 0/1) tensor of shape `[max_delay_steps, N]` where
-/// `N` is the number of neurons.  Each call to `push()` writes the current
-/// spike vector into the ring buffer at the write head and advances the
-/// head.  `read(delay)` returns the spike vector that was pushed `delay`
-/// steps ago.
-///
-/// All storage lives on the specified torch::Device (typically CUDA).
+/// @details
+/// Internally stores a @c float tensor of shape @c [max_delay_steps, N].
+/// Reads and writes are O(1) pointer arithmetic in the ring.
 class SpikeBuffer {
 public:
+    /// @brief Construct a SpikeBuffer.
+    ///
     /// @param n                Number of neurons.
     /// @param max_delay_steps  Maximum supported delay in fast timesteps.
-    /// @param device           Torch device for the internal buffer.
+    /// @param device           Torch device for the internal buffer tensor.
     SpikeBuffer(int64_t n, int64_t max_delay_steps, torch::Device device);
 
-    /// Push a spike vector for the current timestep.
+    /// @brief Push a spike vector for the current timestep.
     ///
-    /// @param spikes  A 1-D float tensor of shape [N] (0.0 or 1.0).
+    /// @details
+    /// Writes @p spikes into the ring at the current write head and advances
+    /// the head.  The oldest entry is silently overwritten.
+    ///
+    /// @param spikes  1-D @c float tensor of shape @c [N] with 0.0 or 1.0 entries.
     void push(const torch::Tensor& spikes);
 
-    /// Read the spike vector that was pushed `delay_steps` ago.
+    /// @brief Read the spike vector that was pushed @p delay_steps steps ago.
     ///
-    /// @param delay_steps  How many steps back to look (1 = previous push).
-    /// @return  A 1-D float tensor of shape [N].
+    /// @param delay_steps  How many steps back to look (1 = the most recent push).
+    /// @return  1-D @c float tensor of shape @c [N].
     torch::Tensor read(int64_t delay_steps) const;
 
-    /// Batched read: for each neuron, look back by a per-neuron delay.
+    /// @brief Batched read with per-neuron delay offsets.
     ///
-    /// @param delay_steps  A 1-D int64 tensor of shape [N] giving per-neuron
-    ///                     delays.
-    /// @return  A 1-D float tensor of shape [N] — one spike value per neuron.
+    /// @details
+    /// For each neuron @c i, reads the spike from @c delay_steps[i] steps ago.
+    /// Useful when synaptic delays are heterogeneous across a population.
+    ///
+    /// @param delay_steps  1-D @c int64 tensor of shape @c [N] with per-neuron delays.
+    /// @return  1-D @c float tensor of shape @c [N].
     torch::Tensor read_batch(const torch::Tensor& delay_steps) const;
 
-    /// Zero the entire buffer and reset the write head.
+    /// @brief Zero the entire buffer and reset the write head to position 0.
     void reset();
 
-    /// Maximum delay this buffer supports (in fast timesteps).
+    /// @brief Maximum delay this buffer can represent (in fast timesteps).
     int64_t max_delay() const { return max_delay_steps_; }
 
-    /// Number of neurons tracked.
+    /// @brief Number of neurons tracked by this buffer.
     int64_t size() const { return n_; }
 
 private:
-    torch::Tensor buffer_;    // [max_delay_steps, N]
-    int64_t n_;
-    int64_t max_delay_steps_;
-    int64_t write_pos_ = 0;  // next row to write into
+    torch::Tensor buffer_;    ///< Ring storage @c [max_delay_steps, N].
+    int64_t n_;               ///< Number of neurons.
+    int64_t max_delay_steps_; ///< Ring depth.
+    int64_t write_pos_ = 0;   ///< Next row to write into (wraps at @c max_delay_steps_).
 };
 
 } // namespace nrn

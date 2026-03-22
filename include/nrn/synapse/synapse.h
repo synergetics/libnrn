@@ -1,6 +1,14 @@
-#pragma once
+/// @file synapse.h
+/// @brief Aggregate include for all built-in synapse models.
+///
+/// @details
+/// Pulls in StaticSynapse, ExponentialSynapse, DoubleExponentialSynapse,
+/// and AMPASynapse together with their option structs.
+///
+/// @see nrn/synapse/static.h, nrn/synapse/exponential.h,
+///      nrn/synapse/double_exponential.h, nrn/synapse/ampa.h
 
-/// Aggregate include for all synapse models.
+#pragma once
 
 #include <nrn/synapse/options.h>
 #include <nrn/synapse/static.h>

@@ -1,8 +1,11 @@
-#pragma once
-
-/// Umbrella header for the libnrn framework.
+/// @file nrn.h
+/// @brief Umbrella header for the libnrn framework (legacy path).
 ///
+/// @details
 /// Including this single header gives access to all public API types.
+/// Prefer the canonical path @c <nrn/nrn.h> for new code.
+
+#pragma once
 
 // Core
 #include <nrn/core/types.h>

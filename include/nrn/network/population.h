@@ -1,3 +1,19 @@
+/// @file population.h
+/// @brief Population struct — a named group of neurons sharing one NrnModule.
+///
+/// @details
+/// Population is a plain C++ struct (no virtual methods) that bundles:
+///   - a type-erased @c NrnModule handle to the neuron model,
+///   - a @c State named-tensor bag (populated on first @c nrn_forward() call),
+///   - the neuron count @c n, and
+///   - optional 3-D spatial positions.
+///
+/// Populations are owned by a @c Region via @c shared_ptr and are referenced
+/// by the compiled Graph via non-owning @c State* pointers — **the Region must
+/// outlive the Graph**.
+///
+/// @see Region, NrnModule, State, NodeGroup
+
 #pragma once
 
 #include <optional>
@@ -11,24 +27,31 @@
 
 namespace nrn {
 
-/// A named group of neurons (or other cells) sharing the same model.
+/// @brief A named group of neurons sharing a single neuron model.
 ///
-/// Plain struct — holds a type-erased NrnModule handle, the runtime State,
-/// a name, and optional spatial positions.
+/// @details
+/// Plain struct; all polymorphism is expressed through @c NrnModule::ops.
+/// The @c state field is empty at construction; it is populated by the
+/// first @c nrn_forward() call when the model publishes its state variables.
 struct Population {
-    std::string name;
-    NrnModule module;       // ops-based handle to the neuron model
-    State state;
-    int64_t n;
-    std::optional<torch::Tensor> positions;
+    std::string name;    ///< Human-readable population identifier.
+    NrnModule module;    ///< Type-erased handle to the neuron model.
+    State state;         ///< Named tensor bag; populated on first forward pass.
+    int64_t n;           ///< Number of neurons.
+    std::optional<torch::Tensor> positions; ///< Optional spatial positions @c [n, 3] (metres).
 };
 
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------
-
-/// Create a population. The NrnModule should already be initialized
-/// (e.g. via lif_as_module(lif_create(...))).
+/// @brief Allocate and initialise a Population.
+///
+/// @details
+/// The @p module handle must already be fully initialised
+/// (e.g. via @c lif_as_module(lif_create(…))).
+///
+/// @param name    Human-readable name.
+/// @param module  Type-erased neuron model handle.
+/// @param n       Number of neurons (must be > 0).
+/// @param device  Device hint (currently unused; tensors are allocated on device when model runs).
+/// @return Heap-allocated Population; caller takes ownership.
 inline Population* population_create(const std::string& name,
                               NrnModule module,
                               int64_t n,
@@ -43,13 +66,16 @@ inline Population* population_create(const std::string& name,
     return pop;
 }
 
-// Destroy a population and free its resources.
+/// @brief Free a Population.
+/// @param pop  Pointer to the Population to destroy.
 inline void population_destroy(Population* pop) {
     delete pop;
 }
 
-// Set the positions of the neurons in the population.
-// The positions tensor should have shape [n, 3].
+/// @brief Set the spatial positions of neurons in the population.
+///
+/// @param pop        Population to modify.
+/// @param positions  Tensor of shape @c [n, 3] giving @c (x, y, z) in metres.
 inline void population_set_positions(Population* pop, torch::Tensor positions) {
     TORCH_CHECK(positions.dim() == 2 && positions.size(0) == pop->n &&
                     positions.size(1) == 3,
@@ -58,7 +84,9 @@ inline void population_set_positions(Population* pop, torch::Tensor positions) {
     pop->positions = std::move(positions);
 }
 
-// Move the population's tensors to the specified device.
+/// @brief Move all tensors in the population (state + positions + module) to @p device.
+/// @param pop     Population to modify.
+/// @param device  Target device.
 inline void population_to_device(Population* pop, torch::Device device) {
     state_to_device(pop->state, device);
     if (pop->positions.has_value()) {
@@ -67,7 +95,9 @@ inline void population_to_device(Population* pop, torch::Device device) {
     nrn_to_device(&pop->module, device);
 }
 
-// Get a string representation of the population for debugging.
+/// @brief Return a human-readable string representation for debugging.
+/// @param pop  Population to describe.
+/// @return Descriptive string.
 inline std::string population_repr(const Population* pop) {
     std::string repr = "Population(name='" + pop->name + "', n=" + std::to_string(pop->n) + ", module=...)";
     if (pop->positions.has_value()) {
