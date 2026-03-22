@@ -20,8 +20,9 @@
 
 namespace nrn {
 
-/// Forward declare for the callback signature.
+// Forward declarations.
 struct Simulation;
+struct Graph;
 
 /// User-supplied callback type.
 using SimCallback = std::function<void(const Simulation&, double)>;
@@ -40,6 +41,9 @@ struct Simulation {
 
     /// (interval, callback) pairs.
     std::vector<std::pair<int64_t, SimCallback>> callbacks;
+
+    /// Compiled graph for execution (owned by Simulation).
+    Graph* graph = nullptr;
 };
 
 // ---------------------------------------------------------------------------

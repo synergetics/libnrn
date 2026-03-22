@@ -4,6 +4,8 @@
 
 #include <nrn/core/module.h>
 #include <nrn/connectivity/connect.h>
+#include <nrn/graph/graph.h>
+#include <nrn/graph/graph_runner.h>
 #include <nrn/monitor/spike_recorder.h>
 #include <nrn/monitor/state_recorder.h>
 
@@ -54,12 +56,19 @@ Simulation* sim_create(Region* region, SimulationOptions options) {
                 nrn_forward(&pop->module, pop->state, 0.0, 0.0);
             }
         }
+
+        // Compile the region into an execution graph.
+        sim->graph = graph_compile(region, device);
     }
 
     return sim;
 }
 
 void sim_destroy(Simulation* sim) {
+    if (sim->graph) {
+        graph_destroy(sim->graph);
+        sim->graph = nullptr;
+    }
     delete sim;
 }
 
@@ -111,83 +120,15 @@ void sim_run_steps(Simulation* sim, int64_t n) {
 }
 
 void sim_step(Simulation* sim) {
-    auto t = sim->clock.time();
-    auto dt = sim->options.dt_fast();
-
-    // --- Phase 1: Zero I_syn for all populations ---
-    for (auto& pop : sim->region->populations) {
-        if (state_contains(pop->state, "I_syn")) {
-            state_get(pop->state, "I_syn").zero_();
-        }
+    if (sim->graph) {
+        graph_step(sim->graph,
+                   sim->clock,
+                   sim->options.dt_fast(),
+                   sim->spike_buffers,
+                   sim->recorders,
+                   sim->callbacks,
+                   sim);
     }
-
-    // --- Phase 2: Deliver spikes through all connections ---
-    for (auto& conn : sim->region->connections) {
-        auto& source_name = conn->source->name;
-
-        torch::Tensor source_spikes;
-        auto it = sim->spike_buffers.find(source_name);
-        if (it != sim->spike_buffers.end()) {
-            source_spikes = it->second.read(1);
-        } else {
-            auto& src_state = conn->source->state;
-            if (state_contains(src_state, "spike")) {
-                source_spikes = state_get(src_state, "spike");
-            } else {
-                continue;
-            }
-        }
-
-        connection_deliver(conn.get(), source_spikes, t, dt);
-    }
-
-    // --- Phase 3: Forward-integrate all neuron populations ---
-    for (auto& pop : sim->region->populations) {
-        nrn_forward(&pop->module, pop->state, t, dt);
-    }
-
-    // --- Phase 4: Push spikes into spike buffers ---
-    for (auto& pop : sim->region->populations) {
-        if (state_contains(pop->state, "spike")) {
-            auto it = sim->spike_buffers.find(pop->name);
-            if (it != sim->spike_buffers.end()) {
-                it->second.push(state_get(pop->state, "spike"));
-            }
-        }
-    }
-
-    // --- Phase 5: Plasticity updates (at slow boundary) ---
-    if (sim->clock.is_slow_boundary()) {
-        for (auto& conn : sim->region->connections) {
-            connection_update_plasticity(
-                conn.get(),
-                conn->source->state,
-                conn->target->state,
-                t, dt);
-        }
-    }
-
-    // --- Phase 6: Record state ---
-    for (auto& rec : sim->recorders) {
-        for (auto& pop : sim->region->populations) {
-            const char* rec_name = rec.ops->population_name(rec.impl);
-            if (pop->name == rec_name) {
-                rec.ops->record(rec.impl, pop->state, t);
-                break;
-            }
-        }
-    }
-
-    // --- Phase 7: Callbacks ---
-    uint64_t step_num = sim->clock.step();
-    for (auto& [interval, callback] : sim->callbacks) {
-        if (step_num > 0 && (step_num % interval) == 0) {
-            callback(*sim, t);
-        }
-    }
-
-    // --- Advance clock ---
-    sim->clock.advance_fast();
 }
 
 // ------------------------------------------------------------------

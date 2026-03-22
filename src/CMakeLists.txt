@@ -26,6 +26,10 @@ set(NRN_SOURCES
     monitor/state_recorder.cpp
 
     config/config.cpp
+
+    graph/graph.cpp
+    graph/edge_ops.cpp
+    graph/graph_runner.cpp
 )
 
 set(NRN_CUDA_SOURCES

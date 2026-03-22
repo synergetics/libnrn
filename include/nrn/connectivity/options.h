@@ -3,6 +3,7 @@
 #include <torch/torch.h>
 
 #include <nrn/core/options.h>
+#include <nrn/graph/edge_types.h>
 
 namespace nrn {
 
@@ -27,6 +28,7 @@ struct ConnectOptions {
     NRN_ARG(double, default_delay, 0.001);
     NRN_ARG(torch::Dtype, weight_dtype, torch::kFloat32);
     NRN_ARG(torch::Dtype, mask_dtype, torch::kFloat16);
+    NRN_ARG(EdgeTrigger, trigger, EdgeTrigger::Spike);
 };
 
 } // namespace nrn
